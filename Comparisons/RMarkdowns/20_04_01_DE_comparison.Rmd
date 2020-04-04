@@ -1,0 +1,289 @@
+---
+title: 'DE comparison'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+<br><br>
+
+```{r load_packages, warning=FALSE, message=FALSE}
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally) ; library(ggExtra)
+library(VennDiagram) ; library(venneuler)
+library(expss)
+library(knitr)
+```
+
+```{r, warning=FALSE, message=FALSE}
+
+# Gandal
+load('./../../Gandal/AllRegions/Data/preprocessed_data.RData')
+DE_info_Gandal = DE_info %>% data.frame %>% mutate('ID' = rownames(datExpr), 'DE' = padj<0.05) %>%
+          dplyr::select(ID, log2FoldChange, padj, DE)
+load('./../../Gandal/AllRegions/Data/filtered_raw_data.RData')
+datExpr_Gandal = datExpr
+datGenes_Gandal = datGenes
+datMeta_Gandal = datMeta
+
+# Gupta
+load('./../../Gupta/AllRegions/Data/preprocessed_data.RData')
+DE_info_Gupta = DE_info %>% data.frame %>% mutate('ID' = rownames(datExpr), 'DE' = padj<0.05) %>%
+          dplyr::select(ID, log2FoldChange, padj, DE)
+load('./../../Gupta/AllRegions/Data/filtered_raw_data.RData')
+datExpr_Gupta = datExpr
+datGenes_Gupta = datGenes
+datMeta_Gupta = datMeta %>% mutate(Sample_ID = ID)
+
+rm(datExpr, datGenes, datMeta, DE_info, dds)
+```
+
+## Pool of genes
+
+```{r}
+all_genes = unique(c(rownames(datExpr_Gandal), rownames(datExpr_Gupta)))
+
+genes_df = data.frame('Gandal' = all_genes %in% rownames(datExpr_Gandal),
+                      'Gupta' = all_genes %in% rownames(datExpr_Gupta))
+
+table_info = genes_df %>% apply_labels(Gandal = 'Gandal', Gupta = 'Gupta')
+
+cat(paste0('Total number of genes: ', nrow(genes_df)))
+
+cro(table_info$Gandal, list(table_info$Gupta, total()))
+
+rm(table_info)
+```
+
+```{r, fig.width=5, fig.height=5}
+grid.newpage()
+grid.draw(draw.pairwise.venn(sum(genes_df$Gandal), sum(genes_df$Gupta), sum(genes_df$Gandal & genes_df$Gupta),
+          category = c('Gandal', 'Gupta'), fill = c('#e6b800', '#0099cc'),
+          fontfamily = rep('sans-serif',3), alpha = rep(0.25,2), lty = rep('blank', 2),
+          cat.fontfamily = rep('sans-serif',2)))
+```
+<br>
+
+## DE Genes
+
+<br>
+
+They don't agree very much...
+
+```{r}
+genes_df = data.frame('Gandal' = all_genes %in% DE_info_Gandal$ID[DE_info_Gandal$DE],
+                      'Gupta' = all_genes %in% DE_info_Gupta$ID[DE_info_Gupta$DE])
+
+table_info = genes_df %>% apply_labels(Gandal = 'Gandal', Gupta = 'Gupta')
+
+cro(table_info$Gandal, list(table_info$Gupta, total()))
+
+rm(table_info)
+```
+
+```{r, fig.width=5, fig.height=5}
+grid.newpage()
+grid.draw(draw.pairwise.venn(sum(genes_df$Gandal), sum(genes_df$Gupta), sum(genes_df$Gandal & genes_df$Gupta),
+          category = c('Gandal', 'Gupta'), fill = c('#e6b800', '#0099cc'),
+          fontfamily = rep('sans-serif',3), alpha = rep(0.25,2), lty = rep('blank', 2),
+          cat.fontfamily = rep('sans-serif',2)))
+```
+
+### Independence test
+
+<br>
+
+Since the two groups don't seem to agree much, I'm going to do a test of independence using the Chi-Squared test:
+
+**Chi-Squared test:** If we assume that two variables are independent, then the values of the contingency table for these variables should be distributed uniformly. And then we check how far away from uniform the actual values are
+
+```{r}
+cont_table = table(genes_df$Gandal, genes_df$Gupta)
+chi2 = chisq.test(cont_table, correct=FALSE)
+
+print(chi2)
+```
+<br>
+
+With this we can calculate Crammer's V to get the correlation between the two groups
+
+```{r}
+sqrt(chi2$statistic / sum(cont_table))[[1]]
+
+rm(cont_table, chi2)
+```
+<br>
+
+**Conclusion:** The variables are not independent but they have a low correlation, probably because Gupta's set of DE genes is much smaller than Gandal's
+
+<br>
+
+### Z-score based outlier metrics
+
+The description for these metrics and implementation for each dataset can be found in Gandal/AllRegions/RMarkdowns/20_03_11_z_score_outlier_methods.html and Gupta/AllRegions/RMarkdowns/20_03_31_z_score_outlier_methods.html
+
+#### Original Z-score
+
+```{r warning=FALSE, message=FALSE}
+calc_z_score = function(datExpr, datMeta, DE_info){
+  max_z_scores = data.frame('ID' = rownames(datExpr), 'max_z_score' = apply(datExpr,1,function(x) max(abs(x-mean(x))/sd(x)))) %>%
+                 left_join(DE_info, by = 'ID')
+  return(max_z_scores)
+}
+
+z_score_Gandal = calc_z_score(datExpr_Gandal, datMeta_Gandal, DE_info_Gandal)
+z_score_Gupta = calc_z_score(datExpr_Gupta, datMeta_Gupta, DE_info_Gupta)
+
+rm(calc_z_scores)
+```
+
+There doesn't seem to be any strong relation between datasets (this is good, since we are assuming they are technical errors in the experiment), although genes that are found to be DE expressed in both datasets seem to have a low score in Gupta's dataset and a slight positive correlation bot the highest values in Gandal
+
+```{r, warning=FALSE, message=FALSE}
+plot_data = z_score_Gandal %>% inner_join(z_score_Gupta, by='ID') %>%
+            mutate(DE = case_when(DE.x & DE.y ~ 'Both',
+                                  DE.x & !DE.y ~ 'Gandal',
+                                  !DE.x & DE.y ~ 'Gupta',
+                                  TRUE ~ 'Neither')) %>%
+            mutate(alpha = case_when(DE == 'Both' ~0.8,
+                                    DE == 'Neither' ~ 0.2,
+                                    TRUE ~ 0.4))
+
+p = plot_data %>% ggplot(aes(max_z_score.x, max_z_score.y, color=DE)) + geom_point(alpha=plot_data$alpha) +
+                  geom_vline(xintercept = mean(plot_data$max_z_score.x)+3*sd(plot_data$max_z_score.x), color='gray', linetype = 'dashed') +
+                  geom_hline(yintercept = mean(plot_data$max_z_score.y)+3*sd(plot_data$max_z_score.y), color='gray', linetype = 'dashed') +
+                  xlab('Gandal') + ylab('Gupta') + geom_smooth(se=FALSE) + 
+                  ggtitle(paste0('Original z-score concordance between datasets, corr=',
+                                 round(cor(plot_data$max_z_score.x, plot_data$max_z_score.y),4))) + 
+                  scale_color_viridis_d() + theme_minimal()
+ggExtra::ggMarginal(p, type = 'density', margins='both', groupColour=TRUE, groupFill=TRUE, size=10)
+
+```
+
+
+#### Robust Z-score
+
+```{r warning=FALSE, message=FALSE}
+calc_z_score = function(datExpr, datMeta, DE_info){
+  max_z_scores = data.frame('ID' = rownames(datExpr), 'max_z_score' = apply(datExpr,1,function(x) max(abs(x-median(x))/mad(x)))) %>%
+                 left_join(DE_info, by = 'ID')
+  return(max_z_scores)
+}
+
+z_score_Gandal = calc_z_score(datExpr_Gandal, datMeta_Gandal, DE_info_Gandal)
+z_score_Gupta = calc_z_score(datExpr_Gupta, datMeta_Gupta, DE_info_Gupta)
+
+rm(calc_z_scores)
+```
+
+There is a much stronger correlation now, specially for the genes with the highest values, which means that we are confusing some biological signal with outliers when we use this metric
+
+- Both datasets share the same highest outlier: ENSG00000173110 (HSPA6) but only Gandal identifies it as DE
+
+```{r, warning=FALSE, message=FALSE}
+plot_data = z_score_Gandal %>% inner_join(z_score_Gupta, by='ID') %>%
+            mutate(DE = case_when(DE.x & DE.y ~ 'Both',
+                                  DE.x & !DE.y ~ 'Gandal',
+                                  !DE.x & DE.y ~ 'Gupta',
+                                  TRUE ~ 'Neither')) %>%
+            mutate(alpha = case_when(DE == 'Both' ~0.8,
+                                    DE == 'Neither' ~ 0.2,
+                                    TRUE ~ 0.4))
+
+p = plot_data %>% ggplot(aes(max_z_score.x, max_z_score.y, color=DE)) + geom_point(alpha=plot_data$alpha) +
+                  geom_vline(xintercept = mean(plot_data$max_z_score.x)+3*sd(plot_data$max_z_score.x), color='gray', linetype = 'dashed') +
+                  geom_hline(yintercept = mean(plot_data$max_z_score.y)+3*sd(plot_data$max_z_score.y), color='gray', linetype = 'dashed') +
+                  xlab('Gandal') + ylab('Gupta') + geom_smooth(se=FALSE, alpha=0.2) + 
+                  scale_y_log10() + scale_x_log10() +
+                  ggtitle(paste0('Robust z-score concordance between datasets, corr=',
+                                 round(cor(plot_data$max_z_score.x, plot_data$max_z_score.y),4))) + 
+                  scale_color_viridis_d() + theme_minimal()
+ggExtra::ggMarginal(p, type = 'density', margins='both', groupColour=TRUE, groupFill=TRUE, size=10)
+
+```
+
+#### Using Gupta's DE info to test Gandal's z-scores
+
+Repeating the same plots performed in Gandal/AllRegions/RMarkdowns/20_03_11_z_score_outlier_methods.html in section Relation to DEA results, but using the DEA results from Gupta
+
+```{r warning=FALSE, message=FALSE}
+datExpr = datExpr_Gandal
+DE_info = DE_info_Gupta
+
+plot_data = data.frame('ID' = rownames(datExpr),
+                       'orig_z_score' = apply(datExpr, 1, function(x) max(abs(x-mean(x))/sd(x))),
+                       'robust_z_score' = apply(datExpr, 1, function(x) max(abs(x-median(x))/mad(x))),
+                       'meanExpr' = log2(rowMeans(datExpr))) %>%
+            inner_join(DE_info, by = 'ID') %>%
+            mutate(outliers_orig_z_score = orig_z_score > mean(orig_z_score) + 3*sd(orig_z_score),
+                   outliers_robust_z_score = robust_z_score > mean(robust_z_score) + 3*sd(robust_z_score))
+```
+
+**Note:** There are no values for windows > 13636 because all the genes belonging to them returned NA in the DEA (as it is shown in the plot on the right)
+
+- The percentage of DE genes remains relatively constant throughout all of the windows except for the highest windows of the robust method
+
+- In the highest windows of the robust method there is a sharp increase in DE genes. This means that this method **is** capturing biological signal and interpreting as noise
+
+- Both methods had a higher percentage of DE genes in their lowest windows, but we don't see this happening here, si this probably means that this pattern reflects the robustness of the genes with the lowest max|z-scores| for both methods
+
+```{r, warning=FALSE, message=FALSE, fig.width=10, fig.height=4}
+w = 1000
+sliding_DE = data.frame('window' = 1:(nrow(datExpr)-w), 'original' = 0, 'robust' = 0)
+original_sort = plot_data %>% arrange(orig_z_score)
+robust_sort = plot_data %>% arrange(robust_z_score)
+
+for(i in 1:nrow(sliding_DE)){
+  sliding_DE$original[i] = mean(original_sort$DE[i:(i+w)], na.rm = TRUE)
+  sliding_DE$robust[i] = mean(robust_sort$DE[i:(i+w)], na.rm = TRUE)
+}
+
+p1 = sliding_DE %>% melt(id.vars='window') %>% dplyr::rename(Metric = variable) %>% 
+               ggplot(aes(window, 100*value, color=Metric)) + geom_line(alpha=0.3) + geom_smooth(se=FALSE) +
+               geom_hline(yintercept = 100*mean(plot_data$DE, na.rm=TRUE), color = 'gray') +
+               ylab('% DE genes in window') + scale_color_manual(values = c('#e60073','#008080')) +
+               theme_minimal()
+
+sliding_DE = data.frame('window' = 1:(nrow(datExpr)-w), 'original' = 0, 'robust' = 0)
+original_sort = plot_data %>% arrange(orig_z_score)
+robust_sort = plot_data %>% arrange(robust_z_score)
+
+for(i in 1:nrow(sliding_DE)){
+  sliding_DE$original[i] = mean(is.na(original_sort$DE[i:(i+w)]), na.rm = TRUE)
+  sliding_DE$robust[i] = mean(is.na(robust_sort$DE[i:(i+w)]), na.rm = TRUE)
+}
+
+p2 = sliding_DE %>% melt(id.vars='window') %>% dplyr::rename(Metric = variable) %>% 
+               ggplot(aes(window, 100*value, color=Metric)) + geom_line(alpha=0.3) + geom_smooth(se=FALSE) + 
+               geom_hline(yintercept = 100*mean(is.na(plot_data$DE), na.rm=TRUE), color = 'gray') + 
+               geom_vline(xintercept = 13636, color='gray', linetype = 'dashed') +
+               ylab('% NAs in DE results in window') + scale_color_manual(values = c('#e60073','#008080')) + 
+               theme_minimal() + theme(legend.position='none')
+
+grid.arrange(p1, p2, nrow=1)
+
+rm(sliding_DE, original_sort, robust_sort, i, p1, p2)
+```
+
+The level of expression remains quite stable for the first half of the windows (it's weird because this plot using Gandal's level of expression had a constant decrease across all windows)
+
+```{r warning=FALSE, message=FALSE}
+sliding_DE = data.frame('window' = 1:(nrow(datExpr)-w), 'original' = 0, 'robust' = 0)
+original_sort = plot_data %>% arrange(orig_z_score)
+robust_sort = plot_data %>% arrange(robust_z_score)
+
+for(i in 1:nrow(sliding_DE)){
+  sliding_DE$original[i] = mean(original_sort$meanExpr[i:(i+w)], na.rm = TRUE)
+  sliding_DE$robust[i] = mean(robust_sort$meanExpr[i:(i+w)], na.rm = TRUE)
+}
+
+sliding_DE %>% melt(id.vars='window') %>% dplyr::rename(Metric = variable) %>% 
+               ggplot(aes(window, 100*value, color=Metric)) + geom_line(alpha=0.3) + geom_smooth(se=FALSE) +
+               geom_hline(yintercept = 100*mean(plot_data$meanExpr, na.rm=TRUE), color = 'gray') +
+               ylab('Mean Expression of genes in window') + scale_color_manual(values = c('#e60073','#008080')) +
+               theme_minimal()
+```
+
+
+
+

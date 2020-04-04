@@ -1,0 +1,372 @@
+---
+title: 'Comparison Between Experiments'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+```{r load_packages, echo=TRUE, include=FALSE}
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(RColorBrewer)
+library(viridis) ; require(gridExtra) ; library(GGally) ; library(ggExtra) ; library(ggpubr)
+library(VennDiagram) ; library(venneuler)
+library(reshape2)
+library(biomaRt)
+library(expss)
+library(knitr)
+library(anRichment) ; library(BrainDiseaseCollection)
+```
+
+In 20_03_03_comparisons.html we tried performing enrichment analysis on the different groups of DE genes depending on the brain region they were found to be significant in, but it didn't give very good results, probably because there are probably many different signals combined in each of these groups (for example, the under and overexpressed genes probably belong to different pathways).
+
+To study this, we already have the WGCNA modules created using the data from all the brain regions, so we just need to perform an enrichment analysis using each of these groups of DE genes as collections, find the modules which are "enriched" in any of these groups and perform a functional enrichment analysis on these modules.
+
+```{r load_datasets, message=FALSE, warning=FALSE}
+
+###################################################################################################
+# Gene Expression data
+
+# All Regions
+load('./../../AllRegions/Data/preprocessed_data.RData')
+datExpr_all = datExpr %>% data.frame
+DE_info_all = DE_info %>% data.frame %>% mutate(ID = rownames(.))
+datMeta_full = datMeta %>% dplyr::select(-matches('SV|Picard'))
+
+# Frontal
+load('./../../Frontal/Data/preprocessed_data.RData')
+datExpr_frontal = datExpr %>% data.frame
+DE_info_frontal = DE_info %>% data.frame %>% mutate(ID = rownames(.))
+datMeta = datMeta %>% dplyr::select(-matches('SV|Picard'))
+datMeta_full = rbind(datMeta_full, datMeta) %>% distinct(Sample_ID, .keep_all = TRUE)
+
+# Occipital
+load('./../../Occipital/Data/preprocessed_data.RData')
+datExpr_occipital = datExpr %>% data.frame
+DE_info_occipital = DE_info %>% data.frame %>% mutate(ID = rownames(.))
+datMeta = datMeta %>% dplyr::select(-matches('SV|Picard'))
+datMeta_full = rbind(datMeta_full, datMeta) %>% distinct(Sample_ID, .keep_all = TRUE)
+
+# Without Occipital
+load('./../../NoOccipital/Data/preprocessed_data.RData')
+datExpr_no_occipital = datExpr %>% data.frame
+DE_info_no_occipital = DE_info %>% data.frame %>% mutate(ID = rownames(.))
+datMeta = datMeta %>% dplyr::select(-matches('SV|Picard'))
+datMeta_full = rbind(datMeta_full, datMeta) %>% distinct(Sample_ID, .keep_all = TRUE)
+
+# Get Entrez Gene ID for all genes
+all_genes = unique(c(DE_info_all$ID, DE_info_frontal$ID,
+                     DE_info_occipital$ID, DE_info_no_occipital$ID))
+getinfo = c('ensembl_gene_id','entrezgene')
+mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl', host='feb2014.archive.ensembl.org')
+genes_EntrezGeneID = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=all_genes, mart=mart)
+colnames(genes_EntrezGeneID)[1] = 'ID'
+
+###################################################################################################
+
+# SFARI Genes
+SFARI_genes = read_csv('./../../../SFARI/Data/SFARI_genes_08-29-2019_w_ensembl_IDs.csv')
+SFARI_genes = SFARI_genes[!duplicated(SFARI_genes$ID) & !is.na(SFARI_genes$ID),]
+
+###################################################################################################
+
+# GO Neuronal annotations: regex 'neuron' in GO functional annotations and label the genes that make a match as neuronal
+GO_annotations = read.csv('./../../AllRegions/Data/genes_GO_annotations.csv')
+GO_neuronal = GO_annotations %>% filter(grepl('neuron', go_term)) %>% 
+              mutate('ID'=as.character(ensembl_gene_id)) %>% 
+              dplyr::select(-ensembl_gene_id) %>% distinct(ID) %>%
+              mutate('Neuronal'=1)
+
+###################################################################################################
+
+# Prepare datasets for enrichment analysis
+GO_col = buildGOcollection(organism = 'human', verbose = 0)
+internal_col = internalCollection(organism = 'human')
+MillerAIBS_col = MillerAIBSCollection(organism = 'human')
+BrainDisease_col = BrainDiseaseCollection(organism = 'human')
+combined_col = mergeCollections(GO_col, internal_col, MillerAIBS_col, BrainDisease_col)
+
+
+
+rm(GO_annotations, datMeta, datExpr, datGenes, dds, DE_info, GO_col, internal_col, MillerAIBS_col,
+   BrainDisease_col, getinfo, mart)
+```
+
+## DE Genes
+
+```{r DE_dataset, warning=FALSE}
+genes_df = data.frame('All' = all_genes %in% DE_info_all$ID[DE_info_all$padj<0.05],
+                      'Fro' = all_genes %in% DE_info_frontal$ID[DE_info_frontal$padj<0.05],
+                      'Occ' = all_genes %in% DE_info_occipital$ID[DE_info_occipital$padj<0.05],
+                      'NoO' = all_genes %in% DE_info_no_occipital$ID[DE_info_no_occipital$padj<0.05],
+                      'ID' = all_genes)
+rownames(genes_df) = all_genes
+genes_df = genes_df[genes_df$All+genes_df$Fro+genes_df$Occ+genes_df$NoO>0,]
+
+cat(paste0('Total number of DE genes: ', nrow(genes_df)))
+```
+
+```{r, fig.width=5, fig.height=5}
+grid.newpage()
+grid.draw(draw.triple.venn(sum(genes_df$All), sum(genes_df$NoO), sum(genes_df$Occ),
+                           sum(genes_df$All*genes_df$NoO), sum(genes_df$Occ*genes_df$NoO), sum(genes_df$All*genes_df$Occ),
+                           sum(genes_df$All*genes_df$NoO*genes_df$Occ),
+          category = c('AllRegions', 'Without Occipital', 'Occipital'), 
+          fill = hcl(h=seq(15, 375, length=4), l=65, c=100)[-4], fontfamily = rep('sans-serif',7),
+          alpha = rep(0.25,3), lty = rep('blank', 3), cat.fontfamily = rep('sans-serif',3)))
+```
+
+```{r}
+rm(datExpr_all, datExpr_frontal, datExpr_no_occipital, datExpr_occipital, DE_info_all, 
+   DE_info_frontal, DE_info_no_occipital, DE_info_occipital)
+```
+
+***
+
+### Enrichment analysis of DE genes in WGCNA modules
+
+Load WGCNA modules
+```{r, warning=FALSE, message=FALSE}
+
+clustering = read_csv('./../../AllRegions/Data/clusters.csv') %>% dplyr::select(ID, DynamicHybrid)
+
+```
+
+#### Define DE gene groups as anRichment gene sets
+
+```{r create_new_anRichment_group}
+
+### CREATE GENE SETS
+create_GeneSet = function(entrez, ID, name){
+  
+  GeneSet = newGeneSet(geneEntrez = entrez, ID = ID, name = name, shortName = name, 
+                       internalClassification = name, description = '', geneEvidence = 'IEP', 
+                       geneSource = 'DE Genes in Gandal\'s dataset',
+                       source = 'DEA from Gandal\'s dataset filtering by different brain regions',
+                       organism = 'human', groups = 'DE_by_region', lastModified = '2020-03-09')
+  
+  return(GeneSet)  
+}
+
+# DE in a single dataset
+entrez = unique(genes_EntrezGeneID$entrezgene[genes_EntrezGeneID$ID %in% genes_df$ID[genes_df$All & !genes_df$Occ & !genes_df$NoO]])
+AllRegions_only_GeneSet = create_GeneSet(entrez, 'DE_AllRegions_only', 'DE Genes in AllRegions dataset only')
+
+entrez = unique(genes_EntrezGeneID$entrezgene[genes_EntrezGeneID$ID %in% genes_df$ID[!genes_df$All & genes_df$Occ & !genes_df$NoO]])
+Occipital_only_GeneSet = create_GeneSet(entrez, 'DE_Occipital_only', 'DE Genes in Occipital dataset only')
+
+entrez = unique(genes_EntrezGeneID$entrezgene[genes_EntrezGeneID$ID %in% genes_df$ID[!genes_df$All & !genes_df$Occ & genes_df$NoO]])
+NoOccipital_only_GeneSet = create_GeneSet(entrez, 'DE_Without_Occipital_only', 'DE Genes in dataset without Occipital lobe only')
+
+# DE in two datasets
+entrez = unique(genes_EntrezGeneID$entrezgene[genes_EntrezGeneID$ID %in% genes_df$ID[genes_df$All & genes_df$Occ & !genes_df$NoO]])
+AllRegions_Occipital_GeneSet = create_GeneSet(entrez, 'DE_AllRegions_Occipital', 'DE Genes in AllRegions and Occipital datasets')
+
+entrez = unique(genes_EntrezGeneID$entrezgene[genes_EntrezGeneID$ID %in% genes_df$ID[genes_df$All & !genes_df$Occ & genes_df$NoO]])
+AllRegions_NoOccipital_GeneSet = create_GeneSet(entrez, 'DE_AllRegions_Wo_Occipital', 'DE Genes in All Regions and without Occipital datasets')
+
+entrez = unique(genes_EntrezGeneID$entrezgene[genes_EntrezGeneID$ID %in% genes_df$ID[!genes_df$All & genes_df$Occ & genes_df$NoO]])
+Occipital_NoOccipital_GeneSet = create_GeneSet(entrez, 'DE_Occipital_Without_Occipital', 'DE Genes in Occipital and without Occipital datasets')
+
+# DE in two datasets
+entrez = unique(genes_EntrezGeneID$entrezgene[genes_EntrezGeneID$ID %in% genes_df$ID[genes_df$All & genes_df$Occ & genes_df$NoO]])
+All_GeneSet = create_GeneSet(entrez, 'DE_all_datasets', 'DE Genes in all three datasets')
+
+
+
+### CREATE GROUP
+DEgroup =  newGroup(name = 'DE_by_region', description = 'Genes found to be DE for different regions of the brain',
+                    source = 'DEA from Gandal\'s dataset filtering by different brain regions')
+
+
+
+### CREATE COLLECTION
+dataSets_list = list(AllRegions_only_GeneSet, Occipital_only_GeneSet, NoOccipital_only_GeneSet,
+                     AllRegions_Occipital_GeneSet, AllRegions_NoOccipital_GeneSet, Occipital_NoOccipital_GeneSet,
+                     All_GeneSet)
+
+DEcollection = newCollection(dataSets = dataSets_list, groups = list(DEgroup))
+
+
+rm(AllRegions_only_GeneSet, Occipital_only_GeneSet, NoOccipital_only_GeneSet, AllRegions_Occipital_GeneSet,
+   AllRegions_NoOccipital_GeneSet, Occipital_NoOccipital_GeneSet, All_GeneSet, create_GeneSet,
+   dataSets_list, DEgroup, entrez)
+```
+
+#### Perform enrichment analysis
+
+- Using as the pool of genes only the ones assigned to a module in WGCNA and with an entrezID assigned to them
+
+```{r enrichment_analysis_for_DE_enrichment, warning=FALSE}
+
+EA_dataset = genes_EntrezGeneID %>% left_join(clustering, by='ID') %>% filter(!is.na(DynamicHybrid) & DynamicHybrid!='gray') %>%
+             left_join(genes_df, by='ID') %>% dplyr::select(-c(All, Occ, NoO, Fro)) %>% filter(!is.na(entrezgene))
+
+# Using useBackground = 'given' because it is recommended when the collection is not that big (<10K genes)
+enrichment = enrichmentAnalysis(classLabels = EA_dataset$DynamicHybrid, identifiers = EA_dataset$entrezgene,
+                                refCollection = DEcollection, threshold = 1e-4, thresholdType = 'Bonferroni',
+                                getOverlapEntrez = FALSE, getOverlapSymbols = TRUE, useBackground = 'given')
+
+enrichment_DE = enrichment$enrichmentTable %>% 
+                dplyr::select(class, dataSetID, shortDataSetName, Bonferroni, FDR, enrichmentRatio,
+                              effectiveClassSize, effectiveSetSize, nCommonGenes) %>%
+                filter(Bonferroni<0.05) %>% arrange(Bonferroni, desc(enrichmentRatio))
+
+kable(enrichment_DE, caption='Enrichment of DE genes in WGCNA modules')
+rm(enrichment)
+```
+
+Enriched modules were four for only four of the seven groups of DE genes
+
+- The Occipital DE dataset seems to be missing almost completely (only present in the intersection of all three datasets), perhaps the network constructed with only that brain lobe is too different to the one considering all of the brain regions? Also, it was the one with the least amount of DE genes, which could also be a factor
+
+```{r}
+cat(paste0('Found ', length(unique(enrichment_DE$class)), ' enriched modules'))
+
+sort(table(enrichment_DE$dataSetID), decreasing = TRUE)
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+
+enriched_modules = table(enrichment_DE$class, enrichment_DE$dataSetID) %>% data.frame %>% dcast(Var1 ~ Var2) %>%
+                   mutate('Total' = DE_all_datasets+DE_AllRegions_only+DE_AllRegions_Wo_Occipital+DE_Without_Occipital_only) %>%
+                   arrange(desc(Total))
+
+colnames(enriched_modules) = c('Module', 'All', 'AllRegions Only', 'AllRegions and w/o Occipital', 'W/o Occipital Only', 'Total')
+
+kable(enriched_modules, caption='Modules enriched in a least one of the DE groups of genes')
+```
+
+<br>
+
+***
+
+### Functional enrichment analysis of enriched WGCNA modules
+
+```{r functional_enrichment_analysis_for_selected_modules}
+
+EA_dataset = EA_dataset %>% mutate(selected_modules = ifelse(DynamicHybrid %in% enrichment_DE$class, DynamicHybrid, 'Other'))
+
+enrichment = enrichmentAnalysis(classLabels = EA_dataset$selected_modules, identifiers = EA_dataset$entrezgene,
+                                refCollection = combined_col, threshold = 1e-4, thresholdType = 'Bonferroni',
+                                getOverlapEntrez = FALSE, getOverlapSymbols = TRUE)
+
+enrichment_functional = enrichment$enrichmentTable %>% filter(class!='Other') %>%
+                        dplyr::select(class, dataSetID, shortDataSetName, Bonferroni, FDR, enrichmentRatio,
+                                      effectiveClassSize, effectiveSetSize, nCommonGenes) %>%
+                        filter(Bonferroni<0.05) %>% arrange(Bonferroni, desc(enrichmentRatio))
+```
+
+<br>
+
+#### Results for DE modules in AllRegions dataset only
+
+```{r}
+
+enriched_modules = enrichment_DE %>% filter(dataSetID == 'DE_AllRegions_only') %>% dplyr::select(class) %>% unique
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[1]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[1]))
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[2]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[2]))
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[3]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[3]))
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[4]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[4]))
+
+```
+
+<br>
+
+#### Results for DE modules in dataset removing Occipital Lobe only
+
+```{r}
+
+enriched_modules = enrichment_DE %>% filter(dataSetID == 'DE_Without_Occipital_only') %>% dplyr::select(class) %>% unique
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[1]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[1]))
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[2]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[2]))
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[3]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[3]))
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[4]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[4]))
+
+```
+
+<br>
+
+#### Results for DE modules found in AllRegions and removing Occipital datasets
+
+```{r}
+
+enriched_modules = enrichment_DE %>% filter(dataSetID == 'DE_AllRegions_Wo_Occipital') %>% dplyr::select(class) %>% unique
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[1]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[1]))
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[2]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[2]))
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[3]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[3]))
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[4]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[4]))
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[5]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[5]))
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[6]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[6]))
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[7]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[7]))
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[8]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[8]))
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[9]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[9]))
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[10]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[10]))
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[11]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[11]))
+```
+
+<br>
+
+#### Results for DE modules in all three datasets
+
+```{r}
+
+enriched_modules = enrichment_DE %>% filter(dataSetID == 'DE_all_datasets') %>% dplyr::select(class) %>% unique
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[1]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[1]))
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[2]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[2]))
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[3]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[3]))
+
+enrichment_functional %>% filter(class %in% enriched_modules$class[4]) %>% dplyr::select(-class) %>% 
+                            kable(caption = paste0('Functional Enrichment for module ', enriched_modules$class[4]))
+
+```
+
+<br>
+
+```{r print_session_info}
+sessionInfo()
+```
+

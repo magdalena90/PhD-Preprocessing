@@ -1,0 +1,1008 @@
+---
+title: 'Data Preprocessing'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+```{r load_packages, message=FALSE, warning=FALSE}
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(plotlyutils)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally) ; library(ggExtra) ; library(ggpubr)
+library(biomaRt) ; library(DESeq2) ; library(sva) ; library(WGCNA) ; library(vsn)
+library(dendextend)
+library(expss)
+library(knitr)
+```
+
+---
+
+## Raw data
+
+Dataset downloaded from [Arkinglab website](http://www.arkinglab.org/resources/) in the *Transcriptome analysis reveals dysregulation of innate immune response genes and neuronal activity-dependent genes in autism* section.
+
+### Load and annotate data
+```{r load_and_annotate_data, warning=FALSE, message=FALSE}
+
+# Load csvs
+datExpr = read.delim('./../Data/datExpr.csv')
+datMeta = read.delim('./../Data/datPheno.csv')
+
+# Create dataset with gene information
+datGenes = data.frame('Ensembl_ID' = substr(datExpr$Gene, 1, 15), 
+                      'gene_name' = substring(datExpr$Gene, 17))
+rownames(datExpr) = datGenes$Ensembl_ID
+datExpr$Gene = NULL
+
+
+### CLEAN METADATA DATA FRAME
+datMeta = datMeta %>% dplyr::select('ID', 'case', 'sampleid', 'brainregion', 'positiononplate', 
+                                       'Gender', 'Age', 'SiteHM', 'RIN', 'PMI', 'Dx')
+datMeta$brainregion = substr(datMeta$ID, 1, 4)
+datMeta = datMeta %>% mutate(brain_lobe = ifelse(brainregion=='ba19', 'Occipital', 'Frontal'),
+                             Diagnosis = ifelse(Dx=='Autism', 'ASD', 'CTL'))
+
+# Convert Diagnosis variable to factor
+datMeta$Diagnosis = factor(datMeta$Diagnosis, levels=c('CTL','ASD'))
+
+# sampleid is actually subject ID
+datMeta = datMeta %>% dplyr::rename(Subject_ID = sampleid)
+
+
+# GO Neuronal annotations: regex 'neuron' in GO functional annotations and label the genes that make a match as neuronal
+GO_annotations = read.csv('./../Data/genes_GO_annotations.csv')
+GO_neuronal = GO_annotations %>% filter(grepl('neuron', go_term)) %>% 
+              mutate('ID'=as.character(ensembl_gene_id)) %>% 
+              dplyr::select(-ensembl_gene_id) %>% distinct(ID) %>%
+              mutate('Neuronal'=1)
+
+
+# SFARI Genes
+SFARI_genes = read_csv('./../../../SFARI/Data/SFARI_genes_08-29-2019_w_ensembl_IDs.csv')
+SFARI_genes = SFARI_genes[!duplicated(SFARI_genes$ID) & !is.na(SFARI_genes$ID),]
+
+# NCBI biotype annotation
+NCBI_biotype = read.csv('./../../../NCBI/Data/gene_biotype_info.csv') %>% 
+               rename(Ensembl_gene_identifier='ensembl_gene_id', type_of_gene='gene_biotype', Symbol='hgnc_symbol') %>% 
+               mutate(gene_biotype = ifelse(gene_biotype=='protein-coding','protein_coding',gene_biotype))
+
+
+rm(GO_annotations)
+```
+
+### Check sample composition
+
+Data description taken from the paper [Transcriptome analysis reveals dysregulation of innate immune response genes and neuronal activity-dependent genes in autism](https://www.nature.com/articles/ncomms6748): 
+
+Transcriptomes from 104 human brain cortical tissue samples were resolved using next-generation RNA sequencing technology at single-gene resolution and through co-expressing gene clusters or modules. Multiple cortical tissues corresponding to Brodmann Area 19 (BA19), Brodmann Area 10 (BA10) and Brodmann Area 44 (BA44) were sequenced in 62, 14 and 28 samples, respectively, resulting in a total of 57 (40 unique individuals) control and 47 (32 unique individuals) autism samples.
+
+*Note:* They analysed all of the regions together
+
+Brain tissue: Frozen brain samples were acquired through the Autism Tissue Program, with samples originating from two different sites: the Harvard Brain Tissue Resource Center and the NICHD Brain and Tissue Bank at the University of Maryland (Gandal's data were obtained also from the Autism Tissue Program, specifically from the Harvard Brain Bank)
+
+Sequenced using Illumina’s HiSeq 2000 (Gandal used Illumina HiSeq 2500, they are compatible)
+
+```{r}
+print(paste0('Dataset includes ', nrow(datExpr), ' genes from ', ncol(datExpr), ' samples belonging to ', length(unique(datMeta$Subject_ID)), ' different subjects.'))
+
+```
+
+In the paper they talk about an original number of 110 samples and dropping 6 because of low gene coverage, resulting in 104 samples (which are the ones that are included in datMeta), but the expression dataset has 120 samples.
+
+```{r}
+no_metadata_samples = colnames(datExpr)[! colnames(datExpr) %in% datMeta$ID]
+no_metadata_subjects = unique(substring(no_metadata_samples, 6))
+
+cat(paste0('Samples without metadata:  ', paste(no_metadata_samples, collapse=', '), '\n\n'))
+
+cat(paste0('Samples without metadata but with subject ID in datMeta: ', 
+             paste(no_metadata_subjects[no_metadata_subjects %in% datMeta$Subject_ID], collapse=', ')))
+```
+
+Since we need the metadata of the samples, I'm going to add the metadata of the samples that share a subject ID with some sample with metadata
+
+```{r}
+add_metadata_subjects = no_metadata_subjects[no_metadata_subjects %in% datMeta$Subject_ID]
+add_metadata_samples = no_metadata_samples[grepl(paste(add_metadata_subjects, collapse='|'),
+                                                 no_metadata_samples)]
+
+for(sample in add_metadata_samples){
+  new_row = datMeta %>% filter(Subject_ID == strsplit(sample,'\\.')[[1]][2]) %>% dplyr::slice(1) %>%
+            mutate(ID = sample, 
+                   brainregion = strsplit(sample,'\\.')[[1]][1],
+                   brain_lobe = ifelse(strsplit(sample,'\\.')[[1]][1]=='ba19','Occipital','Frontal'))
+  datMeta = rbind(datMeta, new_row)
+}
+
+cat(paste0('Number of samples: ', nrow(datMeta)))
+
+rm(no_metadata_subjects, no_metadata_samples, add_metadata_subjects, add_metadata_samples, sample, new_row)
+```
+
+And remove the samples that have no metadata and don't have any other samples that do have metadata.
+
+```{r}
+keep = substring(colnames(datExpr), 6) %in% datMeta$Subject_ID
+
+cat(paste0('Removing ', sum(!keep) ,' samples (', paste(colnames(datExpr)[!keep], collapse=', '), ')\n\n'))
+
+cat(paste0('Belonging to subjects with IDs ', 
+           paste0(unique(substring(colnames(datExpr)[!keep],6)), collapse=', '), '\n'))
+
+datExpr = datExpr[,keep]
+
+# Match order of datExpr columns and datMeta rows
+datMeta = datMeta[match(colnames(datExpr), datMeta$ID),]
+
+# Check they are in the same order
+if(!all(colnames(datExpr) == datMeta$ID)){
+  cat('\norder of samples don\'t match between datExpr and datMeta!\n')
+}
+
+cat(paste0('Removed ', sum(!keep), ' samples, ', sum(keep), ' remaining'))
+
+rm(keep)
+```
+<br>
+
+**Counts distribution:** More than half of the counts are zero and most of the counts are relatively low, but there are some very high outliers (although the highest value is one order of magnitude lower than the maximum in the Gandal dataset)
+```{r, warning=FALSE, message=FALSE}
+count_distr = summary(melt(datExpr))[,2]
+for(i in 1:6){
+  print(count_distr[i])
+}
+
+rm(i, count_distr)
+```
+<br>
+
+**Diagnosis distribution:** There are more CTL samples than controls, but it's relatively balanced
+```{r}
+table_info = datMeta %>% expss::apply_labels(Diagnosis = 'Diagnosis', brain_lobe = 'Brain Lobe', brainregion = 'Brain Region',
+                                             SiteHM = 'Batch', Gender = 'Gender')
+
+cat('By Sample:')
+cro(table_info$Diagnosis)
+
+cat('By Subject:')
+cro(table_info$Diagnosis[!duplicated(table_info$Subject_ID)])
+```
+<br>
+
+**Brain region distribution:** The Occipital lobe has more samples than the Frontal lobe, even though we are combining two brain regions in the Frontal Lobe
+```{r}
+cro(table_info$brainregion)
+cro(table_info$brain_lobe)
+```
+<br>
+
+Most of the Control samples are from the Occipital lobe, the Autism samples are balanced between both lobes. *This may cause problems because Ctl and Occipital are related*
+```{r}
+cro(table_info$Diagnosis, list(table_info$brain_lobe, total()))
+
+cat(paste0(round(100*sum(datMeta$Diagnosis=='CTL' & datMeta$brain_lobe=='Occipital')/sum(datMeta$brain_lobe=='Occipital')),
+           '% of the samples in the Occipital lobe are Control samples\n'))
+```
+<br>
+
+**Gender distribution:** There are thrice as many Male samples than Female ones
+```{r}
+cro(table_info$Gender)
+```
+<br>
+
+There is a small imbalance between gender and diagnosis with more males in the control group than in the autism group
+```{r}
+cro(table_info$Diagnosis, list(table_info$Gender,total()))
+
+cat(paste0('\n',round(100*sum(datMeta$Diagnosis=='CTL' & datMeta$Gender=='M')/sum(datMeta$Diagnosis=='CTL')),
+           '% of the Control samples are Male\n'))
+cat(paste0(round(100*sum(datMeta$Diagnosis=='ASD' & datMeta$Gender=='M')/sum(datMeta$Diagnosis=='ASD')),
+           '% of the Autism samples are Male'))
+```
+<br>
+
+
+**Age distribution:** Subjects between 2 and 82 years old with a mean close to 20
+
+Control samples are less evenly distributed across ages than Autism samples
+```{r}
+summary(datMeta$Age)
+
+datMeta_by_subject = datMeta %>% filter(!duplicated(Subject_ID))
+datMeta_by_subject %>% ggplot(aes(Age)) +
+                       geom_density(alpha=0.5, aes(group=Diagnosis, fill=Diagnosis), color='transparent') +
+                       geom_density(alpha=0.5, fill='gray', color='transparent') +
+                       theme_minimal()
+
+rm(datMeta_by_subject, table_info)
+```
+<br>
+
+### Annotate genes with BioMart information
+
+I was originally running this with the feb2014 version of BioMart because that's the one that Gandal used (and it finds all of the Ensembl IDs, which other versions don't), but it has some outdated biotype annotations, to fix this I'll obtain all the information except the biotype label from BioMart in the same way as it had been done before, and then I'll add the most current biotype label using information from NCBI's website and then from BioMart in the following way:
+
+1.Use BioMart to run a query with the original feb2014 version using the Ensembl IDs as keys to obtain all the information except the biotype labels
+
+2. Annotate genes with Biotype labels:
+
+  2.1 Use the NCBI annotations downloaded from [NCBI's website](https://www.ncbi.nlm.nih.gov/home/download/) and processed in NCBI/RMarkdowns/20_02_07_clean_data.html (there is information for only 26K genes, so some genes will remain unlabelled)
+  
+  2.2 Use the current version (jan2020) to obtain the biotype annotations using the Ensembl ID as keys (some genes don't return a match)
+  
+  2.3 For the genes that didn't return a match, use the current version (jan2020) to obtain the biotype annotations using the gene name as keys (17 genes return multiple labels)
+  
+  2.4 For the genes that returned multiple labels, use the feb2014 version with the Ensembl IDs as keys
+  
+
+```{r annotate_genes, warning=FALSE, fig.height=2}
+
+labels_source = data.frame(data.frame('source' = c('NCBI', 'BioMart2020_byID', 'BioMart2020_byGene', 'BioMart2014'),
+                                      'n_matches' = rep(0,4)))
+
+########################################################################################
+# 1. Query archive version
+
+getinfo = c('ensembl_gene_id','external_gene_id','chromosome_name','start_position',
+            'end_position','strand')
+mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl', host='feb2014.archive.ensembl.org')
+datGenes = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=rownames(datExpr), mart=mart) %>% 
+           rename(external_gene_id = 'hgnc_symbol')
+datGenes$length = datGenes$end_position-datGenes$start_position
+
+cat(paste0('1. ', nrow(datGenes), '/', nrow(datExpr),
+             ' Ensembl IDs weren\'t found in the feb2014 version of BioMart'))
+
+
+########################################################################################
+########################################################################################
+# 2. Get Biotype Labels
+
+cat('2. Add biotype information')
+
+########################################################################################
+# 2.1 Add NCBI annotations
+datGenes = datGenes %>% left_join(NCBI_biotype, by=c('ensembl_gene_id','hgnc_symbol'))
+
+cat(paste0('2.1 ' , sum(is.na(datGenes$gene_biotype)), '/', nrow(datGenes),
+             ' Ensembl IDs weren\'t found in the NCBI database'))
+
+labels_source$n_matches[1] = sum(!is.na(datGenes$gene_biotype))
+
+########################################################################################
+# 2.2 Query current BioMart version for gene_biotype using Ensembl ID as key
+
+getinfo = c('ensembl_gene_id','gene_biotype')
+mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl', host='jan2020.archive.ensembl.org')
+datGenes_biotype = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), mart=mart,
+                         values=datGenes$ensembl_gene_id[is.na(datGenes$gene_biotype)])
+
+cat(paste0('2.2 ' , sum(is.na(datGenes$gene_biotype))-nrow(datGenes_biotype), '/', sum(is.na(datGenes$gene_biotype)),
+             ' Ensembl IDs weren\'t found in the jan2020 version of BioMart when querying by Ensembl ID'))
+
+# Add new gene_biotype info to datGenes
+datGenes = datGenes %>% left_join(datGenes_biotype, by='ensembl_gene_id') %>%
+           mutate(gene_biotype = coalesce(as.character(gene_biotype.x), gene_biotype.y)) %>%
+           dplyr::select(-gene_biotype.x, -gene_biotype.y)
+
+labels_source$n_matches[2] = sum(!is.na(datGenes$gene_biotype)) - labels_source$n_matches[1]
+
+########################################################################################
+# 3. Query current BioMart version for gene_biotype using gene symbol as key
+
+missing_genes = unique(datGenes$hgnc_symbol[is.na(datGenes$gene_biotype)])
+getinfo = c('hgnc_symbol','gene_biotype')
+datGenes_biotype_by_gene = getBM(attributes=getinfo, filters=c('hgnc_symbol'), mart=mart,
+                                 values=missing_genes)
+
+cat(paste0('2.3 ', length(missing_genes)-length(unique(datGenes_biotype_by_gene$hgnc_symbol)),'/',length(missing_genes),
+             ' genes weren\'t found in the current BioMart version when querying by gene name'))
+
+dups = unique(datGenes_biotype_by_gene$hgnc_symbol[duplicated(datGenes_biotype_by_gene$hgnc_symbol)])
+cat(paste0('    ', length(dups), ' genes returned multiple labels (these won\'t be added)'))
+
+# Update information
+datGenes_biotype_by_gene = datGenes_biotype_by_gene %>% filter(!hgnc_symbol %in% dups)
+datGenes = datGenes %>% left_join(datGenes_biotype_by_gene, by='hgnc_symbol') %>% 
+            mutate(gene_biotype = coalesce(gene_biotype.x, gene_biotype.y)) %>%
+            dplyr::select(-gene_biotype.x, -gene_biotype.y)
+
+labels_source$n_matches[3] = sum(!is.na(datGenes$gene_biotype)) - sum(labels_source$n_matches)
+
+########################################################################################
+# 4. Query feb2014 BioMart version for the missing biotypes
+
+missing_ensembl_ids = unique(datGenes$ensembl_gene_id[is.na(datGenes$gene_biotype)])
+
+getinfo = c('ensembl_gene_id','gene_biotype')
+mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl', host='feb2014.archive.ensembl.org')
+datGenes_biotype_archive = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=missing_ensembl_ids, mart=mart)
+
+cat(paste0('2.4 ', length(missing_ensembl_ids)-nrow(datGenes_biotype_archive),'/',length(missing_ensembl_ids),
+             ' genes weren\'t found in the feb2014 BioMart version when querying by Ensembl ID'))
+
+# Update information
+datGenes = datGenes %>% left_join(datGenes_biotype_archive, by='ensembl_gene_id') %>% 
+            mutate(gene_biotype = coalesce(gene_biotype.x, gene_biotype.y)) %>%
+            dplyr::select(-gene_biotype.x, -gene_biotype.y)
+
+labels_source$n_matches[4] = sum(!is.na(datGenes$gene_biotype)) - sum(labels_source$n_matches)
+
+########################################################################################
+# Plot results
+
+labels_source = labels_source %>% mutate(x = 1, percentage = round(100*n_matches/sum(n_matches),1))
+
+p = labels_source %>% ggplot(aes(x, percentage, fill=source)) + geom_bar(position = 'stack', stat = 'identity') +
+    theme_minimal() + coord_flip() + theme(legend.position='bottom', axis.title.y=element_blank(),
+    axis.text.y=element_blank(), axis.ticks.y=element_blank())
+
+ggplotly(p + theme(legend.position='none'))
+as_ggplot(get_legend(p))
+
+########################################################################################
+# Reorder rows to match datExpr
+datGenes = datGenes[match(rownames(datExpr), datGenes$ensembl_gene_id),]
+
+
+rm(getinfo, mart, datGenes_biotype, datGenes_biotype_by_gene, datGenes_biotype_archive,
+   dups, missing_ensembl_ids, missing_genes, labels_source, p)
+```
+
+---
+
+## Filtering
+
+Checking how many SFARI genes are in the dataset
+```{r}
+df = SFARI_genes %>% dplyr::select(-gene_biotype) %>% inner_join(datGenes, by=c('ID'='ensembl_gene_id'))
+
+cat(paste0('Considering all genes, this dataset contains ', length(unique(df$`gene-symbol`)),
+             ' of the ', length(unique(SFARI_genes$`gene-symbol`)), ' SFARI genes\n\n'))
+
+missing_genes = unique(SFARI_genes$`gene-symbol`[! SFARI_genes$`gene-symbol` %in% df$`gene-symbol`])
+
+cat('The missing genes are:')
+for(mg in missing_genes){
+  cat(paste0(mg, ' with a SFARI score of ', SFARI_genes$`gene-score`[SFARI_genes$`gene-symbol`==mg][1], '\n'))
+}
+
+rm(df, missing_genes, mg)
+```
+
+<br>
+1. Filter entries that weren't found in any of the NCBI annotations or biomart queries
+```{r filter_genes_wo_length}
+to_keep = !is.na(datGenes$length)
+#cat(paste0('Names of the rows removed: ', paste(rownames(datExpr)[!to_keep], collapse=', ')))
+
+datGenes = datGenes[to_keep,]
+datExpr = datExpr[to_keep,]
+rownames(datGenes) = datGenes$ensembl_gene_id
+
+cat(paste0('Removed ', sum(!to_keep), ' genes, ', sum(to_keep), ' remaining'))
+```
+
+<br>
+2. Filter genes that do not encode any protein
+
+```{r gene_biotype_table}
+cat(paste0(sum(datGenes$gene_biotype=='protein_coding'), '/', nrow(datGenes), ' are protein coding genes' ))
+
+sort(table(datGenes$gene_biotype), decreasing=TRUE)
+```
+
+
+Most of the genes with low expression levels are not protein-coding
+```{r explore_non_protein_coding_genes, fig.width=10}
+plot_data = data.frame('ID' = rownames(datExpr), 'MeanExpr' = apply(datExpr, 1, mean),
+                       'ProteinCoding' = datGenes$gene_biotype=='protein_coding')
+
+ggplotly(plot_data %>% ggplot(aes(log2(MeanExpr+1), fill=ProteinCoding, color=ProteinCoding)) + geom_density(alpha=0.5) + 
+         theme_minimal())
+
+rm(plot_data)
+```
+
+**Note:** The gene name for Ensembl ID ENSG00000187951 is wrong, it should be AC091057.1 instead of ARHGAP11B, but the biotype is right, so it would still be filtered out
+
+```{r protein_coding_genes_and_SFARI_score}
+df = SFARI_genes %>% dplyr::select(-gene_biotype) %>% inner_join(datGenes, by=c('ID'='ensembl_gene_id'))
+
+cat(paste0('Filtering protein coding genes, we are left with ', length(unique(df$`gene-symbol`[df$gene_biotype=='protein_coding'])),
+             ' SFARI genes'))
+
+kable(df %>% filter(! `gene-symbol` %in% df$`gene-symbol`[df$gene_biotype=='protein_coding']) %>% 
+      dplyr::select(ID, `gene-symbol`, `gene-score`, gene_biotype, syndromic, `number-of-reports`), caption='Lost Genes')
+
+rm(df)
+```
+
+
+```{r filter_non_protein_coding_genes}
+if(!all(rownames(datExpr)==rownames(datGenes))) cat('!!! gene rownames do not match!!!')
+
+to_keep = datGenes$gene_biotype=='protein_coding'
+datExpr = datExpr %>% filter(to_keep)
+datGenes = datGenes %>% filter(to_keep)
+rownames(datExpr) = datGenes$ensembl_gene_id
+rownames(datGenes) = datGenes$ensembl_gene_id
+
+cat(paste0(length(unique(SFARI_genes$`gene-symbol`[SFARI_genes$ID %in% rownames(datExpr)])), ' SFARI genes remaining'))
+
+cat(paste0('Removed ', sum(!to_keep), ' genes, ', sum(to_keep), ' remaining'))
+```
+
+<br>
+3. Filter genes with low expression levels
+
+$\qquad$ 3.1 Remove genes with zero expression in all of the samples
+```{r, warning=FALSE}
+to_keep = rowSums(datExpr)>0
+
+cat(paste0('Removed ', sum(!to_keep), ' genes, ', sum(to_keep), ' remaining'))
+
+# We are filtering out many SFARI genes with level of expression 0 but turns out most of them had another copy in the dataset
+# in another row, so these genes are not actually lost
+genes_with_copies = data.frame('rowSums' = rowSums(datExpr), 'ensembl_gene_id' = rownames(datExpr)) %>%
+     right_join(SFARI_genes, by='ensembl_gene_id') %>% filter(rowSums>0)
+
+df = data.frame('rowSums' = rowSums(datExpr), 'ensembl_gene_id' = rownames(datExpr)) %>%
+     right_join(SFARI_genes, by='ensembl_gene_id') %>% filter(rowSums==0 & !is.na(`gene-score`)) %>%
+     arrange(`gene-score`) %>% dplyr::select(-ensembl_gene_id) %>% 
+     filter(!duplicated(`gene-symbol`), !`gene-symbol` %in% genes_with_copies$`gene-symbol`)
+
+kable(df %>% dplyr::select(ID, `gene-symbol`, `gene-score`, syndromic, `number-of-reports`), 
+      caption='Lost Genes with SFARI Scores')
+
+datGenes = datGenes[to_keep,]
+datExpr = datExpr[to_keep,]
+
+cat(paste0(length(unique(SFARI_genes$`gene-symbol`[SFARI_genes$ID %in% rownames(datExpr)])), ' SFARI genes remaining'))
+
+rm(df, genes_with_copies)
+```
+
+$\qquad$ 2.2 Removing genes with a high percentage of zeros
+
+<br>
+
+Choosing the threshold:
+
+**Criteria for selecting the percentage of zeros threshold:** The minimum value in which the preprocessed data is relatively homoscedastic (we're trying to get rid of the group of genes with very low mean and SD that make the cloud of points look like a comic book speech bubble)
+
+- On the plot I'm using the "dual" of the maximum percentage of zeros, the minimum percentage of non zeros so the visualisation is more intuitive
+
+- 75% seems to be a good threshold for the minimum percentage of non zeros, so 25% will be the maximum percentage of zeros allowed in a row
+
+- The Mean vs SD plot doesn't show all of the genes, a random sample was selected for the genes with higher level of expression so the visualisation wouldn't be as heavy (and since we care about the genes with the lowest levels of expression, we aren't losing important information)
+
+```{r}
+datMeta_original = datMeta
+datExpr_original = datExpr
+datGenes_original = datGenes
+```
+
+```{r echo=FALSE, include=FALSE, warning=FALSE, message=FALSE, fig.width=10}
+thresholds = round(100*(ncol(datExpr)-c(seq(100,7,-10),5,3,2,0))/ncol(datExpr))
+
+for(threshold in thresholds){
+  
+  datMeta = datMeta_original
+  datExpr = datExpr_original
+  datGenes = datGenes_original
+  
+  to_keep = apply(datExpr, 1, function(x) 100*mean(x>0)) >= threshold
+  datGenes = datGenes[to_keep,]
+  datExpr = datExpr[to_keep,]
+  
+  # Filter outlier samples
+  absadj = datExpr %>% bicor %>% abs
+  netsummary = fundamentalNetworkConcepts(absadj)
+  ku = netsummary$Connectivity
+  z.ku = (ku-mean(ku))/sqrt(var(ku))
+  
+  to_keep = z.ku > -2
+  datMeta = datMeta[to_keep,]
+  datExpr = datExpr[,to_keep]
+  
+  rm(absadj, netsummary, ku, z.ku, to_keep)
+  
+  
+  # Create a DeseqDataSet object, estimate the library size correction and save the normalized counts matrix
+  counts = datExpr %>% as.matrix
+  rowRanges = GRanges(datGenes$chromosome_name,
+                    IRanges(datGenes$start_position, width=datGenes$length),
+                    strand=datGenes$strand,
+                    feature_id=datGenes$ensembl_gene_id)
+  se = SummarizedExperiment(assays=SimpleList(counts=counts), rowRanges=rowRanges, colData=datMeta)
+  dds = DESeqDataSet(se, design =~Diagnosis)
+  
+  # Perform vst
+  vsd = vst(dds)
+  
+  datExpr_vst = assay(vsd)
+  datMeta_vst = colData(vsd)
+  datGenes_vst = rowRanges(vsd)
+  
+  rm(counts, rowRanges, se, vsd)
+  
+  # Save summary results in dataframe
+  if(threshold == thresholds[1]){
+    mean_vs_sd_data = data.frame('threshold'=threshold, 'ID'=rownames(datExpr_vst),
+                                 'Mean'=rowMeans(datExpr_vst), 'SD'=apply(datExpr_vst,1,sd))
+  } else {
+    new_entries = data.frame('threshold'=threshold, 'ID'=rownames(datExpr_vst),
+                                 'Mean'=rowMeans(datExpr_vst), 'SD'=apply(datExpr_vst,1,sd))
+    mean_vs_sd_data = rbind(mean_vs_sd_data, new_entries)
+  }
+}
+
+# Visualise the effects of different thresholds
+to_keep_1 = mean_vs_sd_data$ID[mean_vs_sd_data$threshold==thresholds[1] & mean_vs_sd_data$Mean<7] %>%
+            as.character
+to_keep_2 = mean_vs_sd_data$ID[mean_vs_sd_data$threshold==thresholds[1] & mean_vs_sd_data$Mean>=7]
+to_keep_2 = to_keep_2 %>% sample(round(length(to_keep_2)/10)) %>% as.character
+
+plot_data = mean_vs_sd_data[mean_vs_sd_data$ID %in% c(to_keep_1, to_keep_2),]
+
+ggplotly(plot_data %>% ggplot(aes(Mean, SD)) + 
+         geom_point(color='#0099cc', alpha=0.2, aes(id=ID, frame=threshold)) + 
+         scale_x_log10() + scale_y_log10() + theme_minimal())
+
+# Plot remaining genes
+plot_data = mean_vs_sd_data %>% group_by(threshold) %>% tally
+
+ggplotly(plot_data %>% ggplot(aes(threshold, n)) + geom_point() + geom_line() +
+         theme_minimal() + ggtitle('Remaining genes for each filtering threshold'))
+
+rm(to_keep_1, to_keep_2, plot_data, thresholds)
+```
+
+```{r}
+# Return to original variables
+datExpr = datExpr_original
+datGenes = datGenes_original
+datMeta = datMeta_original
+
+rm(datExpr_original, datGenes_original, datMeta_original, datExpr_vst, datGenes_vst, datMeta_vst)
+```
+
+
+<br>
+
+Filtering
+```{r, warning=FALSE, fig.width=10}
+
+# Minimum percentage of non-zero entries allowed per gene
+threshold = 80
+
+plot_data = data.frame('id'=rownames(datExpr), 'non_zero_percentage' = apply(datExpr, 1, function(x) 100*mean(x>0)))
+
+ggplotly(plot_data %>% ggplot(aes(x=non_zero_percentage)) + geom_density(color='#0099cc', fill='#0099cc', alpha=0.3) + 
+         geom_vline(xintercept=threshold, color='gray') + #scale_x_log10() + 
+         ggtitle('Percentage of non-zero entries distribution') + theme_minimal())
+
+to_keep = apply(datExpr, 1, function(x) 100*mean(x>0)) >= threshold
+datGenes = datGenes[to_keep,]
+datExpr = datExpr[to_keep,]
+
+cat(paste0(length(unique(SFARI_genes$`gene-symbol`[SFARI_genes$ID %in% rownames(datExpr)])), ' SFARI genes remaining'))
+
+cat(paste0('Removed ', sum(!to_keep), ' genes, ', sum(to_keep), ' remaining'))
+
+rm(threshold, plot_data, to_keep)
+```
+
+<br>
+3. Filter outlier samples
+
+Using node connectivity as a distance measure, normalising it and filtering out genes farther away than 2 standard deviations from the left (lower connectivity than average, not higher)
+
+- Gandal uses the formula $s_{ij}=\frac{1+bw(i,j)}{2}$ to convert all the weights to positive values, but I used $s_{ij}=|bw(i,j)|$ instead because I think it makes more sense. In the end it doesn't matter because they select as outliers the same six samples
+
+- Only 2 outliers, both with ASD Diagnosis
+
+```{r, warning=FALSE}
+absadj = datExpr %>% bicor %>% abs
+netsummary = fundamentalNetworkConcepts(absadj)
+ku = netsummary$Connectivity
+z.ku = (ku-mean(ku))/sqrt(var(ku))
+
+plot_data = data.frame('sample'=1:length(z.ku), 'distance'=z.ku, 'Sample_ID'=datMeta$ID, 
+                       'Subject_ID'=datMeta$Subject_ID, 'Site'=datMeta$SiteHM,
+                       'Brain_Lobe'=datMeta$brain_lobe, 'Sex'=datMeta$Gender, 'Age'=datMeta$Age,
+                       'Diagnosis'=datMeta$Diagnosis, 'PMI'=as.numeric(datMeta$PMI))
+selectable_scatter_plot(plot_data, plot_data[,-c(1,2)])
+
+cat(paste0('Outlier samples: ', paste(as.character(plot_data$Sample_ID[plot_data$distance< -2]), collapse=', ')))
+```
+
+```{r}
+to_keep = z.ku > -2
+datMeta = datMeta[to_keep,]
+datExpr = datExpr[,to_keep]
+
+cat(paste0('Removed ', sum(!to_keep), ' samples, ', sum(to_keep), ' remaining'))
+
+rm(absadj, netsummary, ku, z.ku, plot_data, to_keep)
+```
+
+```{r}
+cat(paste0('After filtering, the dataset consists of ', nrow(datExpr), ' genes and ', ncol(datExpr), ' samples'))
+```
+<br><br>
+
+---
+
+## Batch Effects
+
+According to [Tackling the widespread and critical impact of batch effects in high-throughput data](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3880143/), technical artifacts can be an important source of variability in the data, so batch correction should be part of the standard preprocessing pipeline of gene expression data.
+
+They say Processing group and Date of the experiment are good batch surrogates, I only have processing group, so I'm going to see if this affects the data in any clear way to use it as a surrogate.
+<br>
+
+All the information we have is the Brain Bank (H/M), and although all the samples were obtained from the Autism Tissue Project, we don’t have any more specific information about who preprocessed each sample
+
+```{r}
+table(datMeta$SiteHM)
+```
+<br>
+
+*There seems to be an important bias between the site that processed the samples and the objective variable, so the batch effect can be confused with the diagnosis effect.*
+
+```{r}
+table(datMeta$SiteHM, datMeta$Diagnosis)
+```
+
+Samples don’t seem to cluster together that strongly for each batch, although there does seem to be some kind of relation, but it could be due to diagnosis, not to batch (this is the problem with unbalanced diagnosis between batches!)
+
+```{r samples_histogram, fig.width=10}
+h_clusts = datExpr %>% t %>% dist %>% hclust %>% as.dendrogram
+
+create_viridis_dict = function(){
+  min_age = datMeta$Age %>% min
+  max_age = datMeta$Age %>% max
+  viridis_age_cols = viridis(max_age - min_age + 1)
+  names(viridis_age_cols) = seq(min_age, max_age)
+  
+  return(viridis_age_cols)
+}
+viridis_age_cols = create_viridis_dict()
+
+dend_meta = datMeta[match(labels(h_clusts), datMeta$ID),] %>% 
+            mutate('Site' = ifelse(SiteHM=='H', '#F8766D', '#00BFC4'),
+                   'Diagnosis' = ifelse(Diagnosis=='CTL','#008080','#86b300'), # Blue control, Green ASD
+                   'Sex' = ifelse(Gender=='F','#ff6666','#008ae6'),            # Pink Female, Blue Male
+                   'Region' = case_when(brain_lobe=='Frontal'~'#F8766D',        # ggplot defaults for 2 colours
+                                        brain_lobe=='Occipital'~'#00BFC4'),
+                   'Age' = viridis_age_cols[as.character(Age)]) %>%             # Purple: young, Yellow: old
+            dplyr::select(Age, Region, Sex, Diagnosis, Site)
+h_clusts %>% dendextend::set('labels', rep('', nrow(datMeta))) %>% dendextend::set('branches_k_color', k=9) %>% plot
+colored_bars(colors=dend_meta)
+
+rm(h_clusts, dend_meta, create_viridis_dict, viridis_age_cols)
+```
+
+Comparing the mean expression of each sample by batch we can see there is some batch effect differentiating them, but it could be because of the imbalance in Diagnosis by batches, since in the exploratory analysis we can see that ASD samples have a higher general level of expression compared to the CTL group (see 20_03_31_exploratory_analysis.html)
+```{r, warning=FALSE}
+plot_data_b1 = data.frame('Mean'=colMeans(datExpr[,datMeta$SiteHM=='H']), 'Batch'='H')
+plot_data_b2 = data.frame('Mean'=colMeans(datExpr[,datMeta$SiteHM=='M']), 'Batch'='M')
+
+plot_data = rbind(plot_data_b1, plot_data_b2)
+mu = plot_data %>% group_by(Batch) %>% dplyr::summarise(BatchMean=mean(Mean))
+
+ggplotly(plot_data %>% ggplot(aes(x=Mean, color=Batch, fill=Batch)) + geom_density(alpha=0.3) + 
+         geom_vline(data=mu, aes(xintercept=BatchMean, color=Batch), linetype='dashed') +
+         ggtitle('Mean expression by sample grouped by Batch') + scale_x_log10() + theme_minimal())
+
+rm(plot_data_b1, plot_data_b2, plot_data, mu)
+```
+
+<br>
+
+### Looking for unknown sources of batch effects
+
+Following the pipeline from [Surrogate variable analysis: hidden batch effects](https://biodatascience.github.io/compbio/dist/sva.html) where sva is used with DESeq2.
+
+Create a DeseqDataSet object, estimate the library size correction and save the normalized counts matrix
+```{r}
+counts = datExpr %>% as.matrix
+rowRanges = GRanges(datGenes$chromosome_name,
+                  IRanges(datGenes$start_position, width=datGenes$length),
+                  strand=datGenes$strand,
+                  feature_id=datGenes$ensembl_gene_id)
+se = SummarizedExperiment(assays=SimpleList(counts=counts), rowRanges=rowRanges, colData=datMeta)
+dds = DESeqDataSet(se, design =~Diagnosis)
+
+dds = estimateSizeFactors(dds)
+norm.cts = counts(dds, normalized=TRUE)
+```
+
+Provide the normalized counts and two model matrices to SVA. The first matrix uses the biological condition, and the second model matrix is the null model.
+```{r}
+mod = model.matrix(~ Diagnosis, colData(dds))
+mod0 = model.matrix(~ 1, colData(dds))
+sva_fit = svaseq(norm.cts, mod=mod, mod0=mod0)
+
+rm(mod, mod0, norm.cts)
+```
+
+Found 23 surrogate variables, since there is no direct way to select which ones to pick [Bioconductor answer](https://support.bioconductor.org/p/71447/), decided to keep all of them.
+
+Include SV estimations to datMeta information
+```{r}
+sv_data = sva_fit$sv %>% data.frame
+colnames(sv_data) = paste0('SV',1:ncol(sv_data))
+
+datMeta_sva = cbind(datMeta, sv_data)
+
+rm(sv_data, sva_fit)
+```
+
+**In conclusion:** Site could work as a surrogate for batch effects, but has the HUGE downside that is correlated to Diagnosis. The sva package found other 23 variables that could work as surrogates which are now included in datMeta and should be included in the DEA.
+<br><br>
+
+---
+
+## Normalisation and Differential Expression Analysis
+
+Using DESeq2 package to perform normalisation. Chose this package over limma because limma uses the log transformed data as input instead of the raw counts and I have discovered that in this dataset, this transformation affects genes differently depending on their mean expression level, and genes with a high SFARI score are specially affected by this.
+
+```{r}
+plot_data = data.frame('ID'=rownames(datExpr), 'Mean'=rowMeans(datExpr), 'SD'=apply(datExpr,1,sd))
+
+plot_data %>% ggplot(aes(Mean, SD)) + geom_point(color='#0099cc', alpha=0.1) + geom_abline(color='gray') +
+              scale_x_log10() + scale_y_log10() + theme_minimal()
+
+rm(plot_data)
+```
+
+- **Using vst** instead of rlog to perform normalisation. [Bioconductor question](https://support.bioconductor.org/p/104615/) explaining differences between methods. Chose vst because **a)** it is much faster than rlog (it is recommended to use vst for samples larger than 50), and **b)** Michael Love (author of DESEq2) recommends using it over rlog
+
+- **Including a log fold change threshold of 0 in the results formula** $H_0:lfc=0$ because setting any other log fold change seems arbitrary and we risk losing genes with a significant differential expression for genes with a higher difference, but not necessarily as significant.
+
+```{r normalisation}
+counts = datExpr %>% as.matrix
+rowRanges = GRanges(datGenes$chromosome_name,
+                  IRanges(datGenes$start_position, width=datGenes$length),
+                  strand=datGenes$strand,
+                  feature_id=datGenes$ensembl_gene_id)
+se = SummarizedExperiment(assays=SimpleList(counts=counts), rowRanges=rowRanges, colData=datMeta_sva)
+dds = DESeqDataSet(se, design = ~ SiteHM + SV1 + SV2 + SV3 + SV4 + SV5 + SV6 + SV7 + SV8 + SV9 + 
+                                  SV10 + SV11 + SV12 + SV13 + SV14 + SV15 + SV16 + SV17 + SV18 +
+                                  SV19 + SV20 + SV21 + SV22 + SV23 + Diagnosis)
+
+# Perform DEA
+#dds = DESeq(dds) # Changed this for the three lines below because some rows don't converge
+dds = estimateSizeFactors(dds)
+dds = estimateDispersions(dds)
+dds = nbinomWaldTest(dds, maxit=10000)
+
+DE_info = results(dds, lfcThreshold=0, altHypothesis='greaterAbs')
+
+# Perform vst
+vsd = vst(dds)
+
+datExpr_vst = assay(vsd)
+datMeta_vst = colData(vsd)
+datGenes_vst = rowRanges(vsd)
+
+rm(counts, rowRanges, se, vsd)
+```
+
+Using the plotting function [DESEq2's manual](http://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html) proposes to study vst's output it looks like the data could be homoscedastic
+```{r}
+meanSdPlot(datExpr_vst, plot=FALSE)$gg + theme_minimal()
+```
+
+When plotting point by point it seems like the genes with the lowest values behave differently
+```{r}
+plot_data = data.frame('ID'=rownames(datExpr_vst), 'Mean'=rowMeans(datExpr_vst), 'SD'=apply(datExpr_vst,1,sd))
+
+plot_data %>% ggplot(aes(Mean, SD)) + geom_point(color='#0099cc', alpha=0.2) + 
+              scale_x_log10() + scale_y_log10() + theme_minimal()
+
+rm(plot_data)
+```
+<br><br>
+
+
+---
+
+---
+
+### Save filtered and annotated dataset
+
+*Could have done this since before
+```{r}
+save(datExpr, datMeta, datGenes, file='./../Data/filtered_raw_data.RData')
+#load('./../Data/Gandal/filtered_raw_data.RData')
+```
+
+Rename normalised datasets to continue working with these
+```{r}
+datExpr = datExpr_vst
+datMeta = datMeta_vst %>% data.frame
+datGenes = datGenes_vst
+
+print(paste0(length(unique(SFARI_genes$`gene-symbol`[SFARI_genes$ID %in% rownames(datExpr)])), ' SFARI genes remaining'))
+
+print(paste0('After filtering, the dataset consists of ', nrow(datExpr), ' genes and ', ncol(datExpr), ' samples'))
+
+rm(datExpr_vst, datMeta_vst, datGenes_vst, datMeta_sva)
+```
+
+<br><br>
+
+---
+
+## Batch Effect Correction
+
+By including the surrogate variables in the DESeq formula we only modelled the batch effects into the DEA, but we didn't actually correct them from the data, for that we need to use ComBat (or other equivalent package) in the already normalised data
+
+### SVA surrogate variables
+
+In some places they say you shouldn't correct these effects on the data because you risk losing biological variation, in others they say you should because they introduce noise to the data. The only thing everyone agrees on is that you shouldn't remove them before performing DEA but instead include them in the model.
+
+Based on the conclusions from [Practical impacts of genomic data “cleaning” on biological discovery using surrogate variable analysis](https://bmcbioinformatics.biomedcentral.com/track/pdf/10.1186/s12859-015-0808-5) it seems like it may be a good idea to remove the batch effects from the data and not only from the DE analysis:
+
+- Using SVA, ComBat or related tools can increase the power to identify specific signals in complex genomic datasets (they found "greatly sharpened global and gene-specific differential expression across treatment groups")
+
+- But caution should be exercised to avoid removing biological signal of interest
+
+- We must be precise and deliberate in the design and analysis of experiments and the resulting data, and also mindful of the limitations we impose with our own perspective
+
+- Open data exploration is not possible after such supervised “cleaning”, because effects beyond those stipulated by the researcher may have been removed
+
+#### Comparing data with and without surrogate variable correction
+
+```{r correct_svs_in_datExpr, warning=FALSE}
+# Taken from https://www.biostars.org/p/121489/#121500
+correctDatExpr = function(datExpr, mod, svs) {
+  X = cbind(mod, svs)
+  Hat = solve(t(X) %*% X) %*% t(X)
+  beta = (Hat %*% t(datExpr))
+  rm(Hat)
+  gc()
+  P = ncol(mod)
+  return(datExpr - t(as.matrix(X[,-c(1:P)]) %*% beta[-c(1:P),]))
+}
+
+pca_samples_before = datExpr %>% t %>% prcomp
+pca_genes_before = datExpr %>% prcomp
+
+# Correct
+mod = model.matrix(~ Diagnosis, colData(dds))
+svs = datMeta %>% dplyr::select(SV1:SV23) %>% as.matrix
+datExpr_corrected = correctDatExpr(as.matrix(datExpr), mod, svs)
+
+pca_samples_after = datExpr_corrected %>% t %>% prcomp
+pca_genes_after = datExpr_corrected %>% prcomp
+
+rm(correctDatExpr)
+```
+
+#### Samples
+
+Removing batch effects has a big impact in the distribution of the samples, separating them by diagnosis relatively well just using the first principal component (although the separation is not nearly as good as with the Gandal dataset)
+```{r pca_samples, warning=FALSE}
+pca_samples_df = rbind(data.frame('ID'=colnames(datExpr), 'PC1'=pca_samples_before$x[,1],
+                                  'PC2'=pca_samples_before$x[,2], 'corrected'=0),
+                       data.frame('ID'=colnames(datExpr), 'PC1'=-pca_samples_after$x[,1],
+                                  'PC2'=-pca_samples_after$x[,2], 'corrected'=1)) %>%
+                 left_join(datMeta %>% mutate('ID'=rownames(datMeta)), by='ID')
+
+ggplotly(pca_samples_df %>% ggplot(aes(PC1, PC2, color=Diagnosis)) + geom_point(aes(frame=corrected, id=ID), alpha=0.75) + 
+         xlab(paste0('PC1 (corr=', round(cor(pca_samples_before$x[,1],pca_samples_after$x[,1]),2),
+                     '). % Var explained: ', round(100*summary(pca_samples_before)$importance[2,1],1),' to ',
+                     round(100*summary(pca_samples_after)$importance[2,1],1))) +
+         ylab(paste0('PC2 (corr=', round(cor(pca_samples_before$x[,2],pca_samples_after$x[,2]),2),
+                     '). % Var explained: ', round(100*summary(pca_samples_before)$importance[2,2],1),' to ',
+                     round(100*summary(pca_samples_after)$importance[2,2],1))) +
+         ggtitle('Samples') + theme_minimal())
+
+rm(pca_samples_df)
+```
+<br>
+
+#### Genes
+
+It seems like the sva correction preserves the mean expression of the genes and erases almost everything else (although what little else remains is enough to characterise the two Diagnosis groups relatively well using only the first PC)
+
+*Plot is done with only 10% of the genes because it was too heavy otherwise
+```{r pca_genes, warning=FALSE, message=FALSE}
+pca_genes_df = rbind(data.frame('ID'=rownames(datExpr), 'PC1'=pca_genes_before$x[,1],
+                                'PC2'=pca_genes_before$x[,2], 'corrected'=0, 'MeanExpr'=rowMeans(datExpr)),
+                     data.frame('ID'=rownames(datExpr), 'PC1'=pca_genes_after$x[,1],
+                                'PC2'=-pca_genes_after$x[,2], 'corrected'=1, 'MeanExpr'=rowMeans(datExpr)))
+
+keep_genes = rownames(datExpr) %>% sample(0.1*nrow(datExpr))
+
+pca_genes_df = pca_genes_df %>% filter(ID %in% keep_genes)
+
+ggplotly(pca_genes_df %>% ggplot(aes(PC1, PC2,color=MeanExpr)) + geom_point(alpha=0.3, aes(frame=corrected, id=ID)) +
+         xlab(paste0('PC1 (corr=', round(cor(pca_genes_before$x[,1],pca_genes_after$x[,1]),2),
+                     '). % Var explained: ', round(100*summary(pca_genes_before)$importance[2,1],1),' to ',
+                     round(100*summary(pca_genes_after)$importance[2,1],1))) +
+         ylab(paste0('PC2 (corr=', round(cor(pca_genes_before$x[,2],pca_genes_after$x[,2]),2),
+                     '). % Var explained: ', round(100*summary(pca_genes_before)$importance[2,2],1),' to ',
+                     round(100*summary(pca_genes_after)$importance[2,2],1))) +
+         scale_color_viridis() + ggtitle('Genes') + theme_minimal())
+
+
+rm(pca_samples_before, pca_genes_before, mod, svs, pca_samples_after, pca_genes_after, pca_genes_df, keep_genes)
+```
+
+
+Decided to keep the corrected expression dataset
+```{r}
+datExpr = datExpr_corrected
+
+rm(datExpr_corrected)
+```
+
+<br>
+
+### Processing site
+
+Even after correcting the dataset for the surrogate variables found with sva, there is still a difference in mean expression by processing site. The problem is that processing site is correlated with Diagnosis, so by correcting it we risk be erasing relevant information related to ASD
+
+```{r, warning=FALSE}
+plot_data_b1 = data.frame('Mean'=colMeans(datExpr[,datMeta$SiteHM=='H']), 'Batch'='H')
+plot_data_b2 = data.frame('Mean'=colMeans(datExpr[,datMeta$SiteHM=='M']), 'Batch'='M')
+
+plot_data = rbind(plot_data_b1, plot_data_b2)
+mu = plot_data %>% group_by(Batch) %>% dplyr::summarise(BatchMean=mean(Mean))
+
+ggplotly(plot_data %>% ggplot(aes(x=Mean, color=Batch, fill=Batch)) + geom_density(alpha=0.3) + 
+         geom_vline(data=mu, aes(xintercept=BatchMean, color=Batch), linetype='dashed') +
+         ggtitle('Mean expression by sample grouped by processing date') + scale_x_log10() + theme_minimal())
+
+rm(plot_data_b1, plot_data_b2, plot_data, mu)
+```
+<br>
+
+### Performing Batch Correction for processing site
+
+I will save the batch corrected dataset as a different dataset because of the correlation between processing site and diagnosis
+
+https://support.bioconductor.org/p/50983/
+
+```{r ComBat}
+datExpr_combat = datExpr %>% as.matrix %>% ComBat(batch=datMeta$SiteHM)
+```
+
+Now both batches have almost the same mean expression (we'd have to see what effect this has on the Diagnosis variable)
+```{r, warning=FALSE}
+plot_data_b1 = data.frame('Mean'=colMeans(datExpr_combat[,datMeta$SiteHM=='H']), 'Batch'='H')
+plot_data_b2 = data.frame('Mean'=colMeans(datExpr_combat[,datMeta$SiteHM=='M']), 'Batch'='M')
+
+plot_data = rbind(plot_data_b1, plot_data_b2)
+mu = plot_data %>% group_by(Batch) %>% dplyr::summarise(BatchMean=mean(Mean))
+
+ggplotly(plot_data %>% ggplot(aes(x=Mean, color=Batch, fill=Batch)) + geom_density(alpha=0.3) + 
+         geom_vline(data=mu, aes(xintercept=BatchMean, color=Batch), linetype='dashed') +
+         ggtitle('Mean expression by sample grouped by processing date') + scale_x_log10() + theme_minimal())
+
+rm(plot_data_b1, plot_data_b2, plot_data, mu)
+```
+<br>
+
+---
+
+#### Save preprocessed datasets with and without ComBat correction
+```{r save_preprocessed_dataset}
+save(datExpr, datMeta, datGenes, DE_info, dds, file='./../Data/preprocessed_data.RData')
+save(datExpr_combat, datMeta, datGenes, DE_info, dds, file='./../Data/preprocessed_data_ComBat.RData')
+#load('./../Data/Gandal/preprocessed_data.RData')
+```
+<br><br>
+
+---
+
+#### Session info
+```{r print_session_info}
+sessionInfo()
+```
+<br><br>

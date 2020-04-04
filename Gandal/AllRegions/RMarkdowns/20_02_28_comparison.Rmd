@@ -1,0 +1,190 @@
+---
+title: 'Comparison between the  two preprocessing outputs'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+```{r load_packages, echo=TRUE, include=FALSE}
+#setwd('/afs/inf.ed.ac.uk/user/s17/s1725186/Documents/PhD-Models/FirstPUModel/RMarkdowns')
+
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(plotlyutils)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally) ; library(ggExtra) ; library(ggpubr)
+library(biomaRt) ; library(DESeq2) ; library(sva) ; library(WGCNA) ; library(vsn)
+library(dendextend) ; library(expss)
+library(knitr)
+library(polycor)
+library(VennDiagram) ; library(venneuler)
+```
+
+Ensembl ID ENSG00000187951 had an incorrect gene name assigned to it, so in the newest preprocessing pipeline it was corrected and removed during Filtering (since it was a lncRNA), but removing this gene from the expression dataset seems to have caused bigger changes in the resulting dataset that expected.
+
+### Gene ENSG00000187951
+
+```{r}
+# Load raw data
+datExpr = read.csv('./../Data/RNAseq_ASD_datExpr.csv', row.names=1)
+datMeta = read.csv('./../Data/RNAseq_ASD_datMeta.csv')
+
+datMeta = datMeta %>% mutate(Brain_Region = as.factor(Region)) %>% 
+                      mutate(Brain_lobe = ifelse(Brain_Region %in% c('BA4_6', 'BA9', 'BA24', 'BA44_45'), 'Frontal',
+                                          ifelse(Brain_Region %in% c('BA3_1_2_5', 'BA7'), 'Parietal',
+                                          ifelse(Brain_Region %in% c('BA38', 'BA39_40', 'BA20_37', 'BA41_42_22'), 'Temporal',
+                                          'Occipital')))) %>%
+                      mutate(Batch = as.factor(gsub('/', '.', RNAExtractionBatch)), 
+                             Diagnosis = factor(Diagnosis_, levels=c('CTL','ASD'))) %>% 
+                      dplyr::select(-Diagnosis_)
+```
+
+The gene has quite a high standard deviation given its mean expression value
+```{r}
+plot_data = data.frame('ID' = rownames(datExpr), 'Mean' = rowMeans(datExpr)+1, 'SD' = apply(datExpr, 1, sd)+1, 
+                       'is_ENSG00000187951' = rownames(datExpr) == 'ENSG00000187951',
+                       alpha = ifelse(rownames(datExpr) == 'ENSG00000187951', 1, 0.1),
+                       color = ifelse(rownames(datExpr) == 'ENSG00000187951', '#006699', '#808080'))
+
+plot_data %>% ggplot(aes(Mean, SD)) + geom_point(alpha = plot_data$alpha, color = plot_data$color) +
+              geom_abline(color='gray') + scale_x_log10() + scale_y_log10() + theme_minimal()
+```
+
+This high variance is caused by a single Sample, which has a very high and uncharacteristic level of expression when comparing it to the level of expression this gene has in the other samples
+```{r}
+plot_data = data.frame('ID' = colnames(datExpr), 'meanExpr' = colMeans(datExpr), 'geneExpr' = t(datExpr[rownames(datExpr) == 'ENSG00000187951',]), 'Diagnosis' = datMeta$Diagnosis)
+
+summary(plot_data$ENSG00000187951)
+
+ggplotly(plot_data %>% ggplot(aes(meanExpr, ENSG00000187951, color=Diagnosis)) + geom_point(alpha=0.8) +
+         theme_minimal() + xlab('Mean expression by Sample') + ylab('Expression of ENSG00000187951 by Sample'))
+```
+
+### Effects in vst transformation
+
+This may be causing changes in the resulting level of expression of the genes when performing the vst transformation to stabilise variance in the dataset
+
+The difference is quite small, but it seems to have linearly lowered the mean level of expression of the genes, affecting the genes with the lowest levels of expression the most
+
+```{r, warning=FALSE, message=FALSE}
+# Original preprocessing
+load('./../Data/preprocessed_data_old.RData')
+datExpr_before = datExpr %>% data.frame
+
+# New preprocessing
+load('./../Data/preprocessed_data.RData')
+datExpr_now = datExpr %>% data.frame
+
+# Remove ENSG00000187951 to compare preprocessed genes
+datExpr_before = datExpr_before
+
+plot_data = data.frame('MeanExpr_before' = rowMeans(datExpr_before)[rownames(datExpr_before)!='ENSG00000187951'],
+                       'MeanExpr_after' = rowMeans(datExpr_now)) %>%
+            mutate(Diff = MeanExpr_before - MeanExpr_after)
+
+summary(plot_data$Diff)
+
+plot_data %>% ggplot(aes(MeanExpr_before, MeanExpr_after, color=Diff)) + geom_point(alpha=0.1) +
+              geom_abline(color='gray') + xlab('Mean Level of Expression Before') + 
+              ylab('Mean Level of Expression Now') + coord_fixed() + scale_color_viridis() + 
+              theme_minimal()
+
+rm(datExpr, plot_data)
+```
+
+### Effects in WGCNA Top Modules
+
+```{r, warning=FALSE}
+getModuleDiagCor = function(dataset, datExpr){
+  ME_object = datExpr %>% t %>% moduleEigengenes(colors = dataset$Module)
+  MEs = orderMEs(ME_object$eigengenes)
+  
+  moduleDiagCor = MEs %>% apply(2, function(x) hetcor(x, datMeta$Diagnosis)$correlations[1,-1])
+  
+  if(sum(!complete.cases(moduleDiagCor))>0){
+    for(m in names(moduleDiagCor)){
+      if(is.na(moduleDiagCor[m]))
+        moduleDiagCor[m] = polyserial(MEs[,m], datMeta$Diagnosis)
+    }
+  }
+  return(moduleDiagCor)
+}
+
+clustering_selected = 'DynamicHybrid'
+
+# Before
+dataset_before = read.csv(paste0('./../Data/dataset_', clustering_selected, '_old.csv'))
+dataset_before$Module = dataset_before[,clustering_selected]
+moduleDiagCor_before = getModuleDiagCor(dataset_before, datExpr_before)
+
+# Now
+dataset_now = read.csv(paste0('./../Data/dataset_', clustering_selected, '.csv'))
+dataset_now$Module = dataset_now[,clustering_selected]
+moduleDiagCor_now = getModuleDiagCor(dataset_now, datExpr_now)
+
+rm(getModuleDiagCor, clustering_selected)
+```
+
+```{r}
+module = dataset_before$Module[dataset_before$ID=='ENSG00000187951']
+cat(paste0('Gene ENSG00000187951 belonged to Module ', module, ' which had a Module-Diagnosis correlation of ',
+           round(moduleDiagCor_before[module][[1]],2)))
+rm(module)
+```
+
+```{r}
+top_modules_before = gsub('ME','',names(moduleDiagCor_before)[abs(moduleDiagCor_before)>0.9])
+top_modules_now = gsub('ME','',names(moduleDiagCor_now)[abs(moduleDiagCor_now)>0.9])
+
+genes_top_modules_memberships = data.frame('ID' = rownames(datExpr_now))
+for(tm in top_modules_before){
+  genes_top_modules_memberships[,tm] = dataset_before$Module[dataset_before$ID!='ENSG00000187951']==tm
+}
+for(tm in top_modules_now){
+  genes_top_modules_memberships[,tm] = dataset_now$Module==tm
+}
+
+cat('Top Modules sizes before:')
+colSums(genes_top_modules_memberships[,1+(1:length(top_modules_before))])
+
+cat('Top Modules sizes now:')
+colSums(genes_top_modules_memberships[,(2+length(top_modules_before)):ncol(genes_top_modules_memberships)])
+
+```
+
+Modules with positive correlation to Diagnosis
+```{r, fig.height=6, fig.width=5.5}
+pos_corr = genes_top_modules_memberships %>%
+           dplyr::select(c(gsub('ME','',names(moduleDiagCor_before)[moduleDiagCor_before>0.9]),
+                           gsub('ME','',names(moduleDiagCor_now)[moduleDiagCor_now>0.9])))
+
+grid.newpage()
+grid.draw(draw.triple.venn(sum(pos_corr[,1]), sum(pos_corr[,2]), sum(pos_corr[,3]),
+                           sum(pos_corr[,1]*pos_corr[,2]), sum(pos_corr[,2]*pos_corr[,3]), sum(pos_corr[,1]*pos_corr[,3]),
+                           sum(pos_corr[,1]*pos_corr[,2]*pos_corr[,3]),
+          category = paste0(colnames(pos_corr), c(' (Before)', ' (Now)', ' (Now)')),
+          fill = colnames(pos_corr), fontfamily = rep('sans-serif',7),
+          alpha = rep(0.25,3), lty = rep('blank', 3), cat.fontfamily = rep('sans-serif',3)))
+
+cat(paste0('We recover ', sum(pos_corr[,1] & pos_corr[,2]+pos_corr[,3]>0), '/',
+           sum(pos_corr[,1]), ' of the genes found in the original Module (',
+           round(100*sum(pos_corr[,1] & pos_corr[,2]+pos_corr[,3]>0)/sum(pos_corr[,1])),'%)'))
+```
+
+Modules with negative correlation to Diagnosis
+```{r, fig.height=6, fig.width=5.5}
+neg_corr = genes_top_modules_memberships %>%
+           dplyr::select(c(gsub('ME','',names(moduleDiagCor_before)[moduleDiagCor_before < -0.9]),
+                           gsub('ME','',names(moduleDiagCor_now)[moduleDiagCor_now < -0.9])))
+
+grid.newpage()
+grid.draw(draw.triple.venn(sum(neg_corr[,1]), sum(neg_corr[,2]), sum(neg_corr[,3]),
+                           sum(neg_corr[,1]*neg_corr[,2]), sum(neg_corr[,2]*neg_corr[,3]), sum(neg_corr[,1]*neg_corr[,3]),
+                           sum(neg_corr[,1]*neg_corr[,2]*neg_corr[,3]),
+          category = paste0(colnames(neg_corr), c(' (Before)', ' (Now)', ' (Now)')),
+          fill = colnames(neg_corr), fontfamily = rep('sans-serif',7),
+          alpha = rep(0.25,3), lty = rep('blank', 3), cat.fontfamily = rep('sans-serif',3)))
+
+cat(paste0('We recover ', sum(neg_corr[,1] & neg_corr[,2]+neg_corr[,3]>0), '/',
+           sum(neg_corr[,1]), ' of the genes found in the original Module (',
+           round(100*sum(neg_corr[,1] & neg_corr[,2]+neg_corr[,3]>0)/sum(neg_corr[,1])),'%)'))
+```
+
+It seems like the original modules were split into two, to which more genes were added, resulting in modules with lower Module-Diagnosis correlation but which contain most of the genes found in the original module

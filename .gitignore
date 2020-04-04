@@ -1,0 +1,10 @@
+
+*.RData
+*.Rhistory
+*/.Rhistory
+*/*/.Rhistory
+*/Data/
+*/*/Data/
+*/*/Visualisations/*.csv
+*Pipfile*
+*.idea/

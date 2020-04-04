@@ -1,0 +1,159 @@
+---
+title: 'Create Random Samples'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+```{r load_packages, echo=TRUE, include=FALSE}
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra)
+library(DESeq2) ; library(sva)
+library(foreach)
+library(doParallel)
+library(expss)
+library(knitr)
+```
+
+Since we are going to create many random samples, it would be a lot of work to manually filter each one of them, so instead I'm going to use the already filtered dataset obtained from preprocessing all the brain regions together and just select different columns for each sample
+
+```{r prepare_data}
+# Load Filtered raw data from the experiment including all brain regions
+load('./../../AllRegions/Data/filtered_raw_data.RData')
+
+# Create original DESeqDataSet object
+counts = datExpr %>% as.matrix
+rowRanges = GRanges(datGenes$chromosome_name,
+                  IRanges(datGenes$start_position, width=datGenes$length),
+                  strand=datGenes$strand,
+                  feature_id=datGenes$ensembl_gene_id)
+se = SummarizedExperiment(assays=SimpleList(counts=counts), rowRanges=rowRanges, colData=datMeta)
+dds = DESeqDataSet(se, design = ~ Diagnosis)
+dds = estimateSizeFactors(dds)
+norm.cts = counts(dds, normalized=TRUE)
+
+# Estimate surrogate variables
+mod = model.matrix(~ Diagnosis, colData(dds))
+mod0 = model.matrix(~ 1, colData(dds))
+sva_fit = svaseq(norm.cts, mod=mod, mod0=mod0)
+sv_data = sva_fit$sv %>% data.frame
+colnames(sv_data) = paste0('SV',1:ncol(sv_data))
+datMeta = cbind(datMeta, sv_data)
+
+
+rm(mod, mod0, norm.cts, sv_data, sva_fit, se, counts, rowRanges)
+```
+
+
+The dataset consisting of all the brain regions except for the Occipital Lobe contains 59 samples, so, to make my samples comparable, I'm going to create random samples of size 59
+
+```{r}
+
+n = 10000
+set.seed(123)
+samples_mat = replicate(n, sort(sample(1:nrow(datMeta), size = 59)))
+
+```
+
+```{r perform_samplings}
+
+if(!file.exists('./../Data/random_samples_DE.RData')){
+  get_DE_info_from_sample = function(s){
+    
+    # Craete DatExpr and datMeta for this sample
+    datExpr_sample = datExpr[,s]
+    datMeta_sample = datMeta[s,]
+    
+    # Create DESeqDataSet object for the sample
+    counts = datExpr_sample %>% as.matrix
+    rowRanges = GRanges(datGenes$chromosome_name, IRanges(datGenes$start_position, width=datGenes$length),
+                        strand=datGenes$strand, feature_id=datGenes$ensembl_gene_id)
+    se = SummarizedExperiment(assays=SimpleList(counts=counts), rowRanges=rowRanges, colData=datMeta_sample)
+    dds = DESeqDataSet(se, design = ~ Batch + SV1 + SV2 + SV3 + SV4 + SV5 + SV6 + SV7 + SV8 + SV9 + 
+                                      SV10 + SV11 + SV12 + SV13 + Diagnosis)
+    # Perform DEA
+    dds = DESeq(dds, quiet=TRUE)
+    DE_info = results(dds, lfcThreshold=0, altHypothesis='greaterAbs') %>% data.frame
+    
+    output = data.frame('ID'=rownames(DE_info), 'lfc'=DE_info$log2FoldChange, 'padj'=DE_info$padj)
+    
+    return(output)
+  }
+  
+  
+  #setup parallel backend to use many processors
+  cores = detectCores()
+  cl = makeCluster(cores[1]-1) #not to overload your computer
+  registerDoParallel(cl)
+
+  output_matrix = foreach(i=1:n, .combine=cbind) %dopar% {
+    
+    library(dplyr) ; library(DESeq2)
+    
+    s = samples_mat[,i] %>% as.vector
+    DE_info_sample = get_DE_info_from_sample(s)
+    colnames(DE_info_sample) = c('ID', paste0('lfc_s',i), paste0('padj_s',i))
+    
+    temp_matrix = data.frame('ID' = rownames(datExpr)) %>% left_join(DE_info_sample, by = 'ID')
+    if(i>1) temp_matrix = temp_matrix %>% dplyr::select(-ID)
+    
+    return(temp_matrix)
+  }
+  
+  lfc_mat = output_matrix %>% dplyr::select(ID, dplyr::contains('lfc'))
+  padj_mat = output_matrix %>% dplyr::select(ID, dplyr::contains('padj'))
+  
+  signif_mat = cbind(as.character(padj_mat$ID), padj_mat[,-1]<0.05) %>% data.frame
+  signif_mat[is.na(signif_mat)] = FALSE
+  signif_mat[,-1] = sapply(signif_mat[,-1], as.logical)
+  colnames(signif_mat) = c('ID', gsub('padj','signif',colnames(signif_mat)[-1]))
+  
+  # Save data
+  save(samples_mat, lfc_mat, padj_mat, signif_mat, file='./../Data/random_samples_DE.RData')
+  
+  rm(get_DE_info_from_sample)
+} else {
+  load('./../Data/random_samples_DE.RData')
+}
+```
+
+#### Total number of DE genes on each random sample
+```{r}
+
+plot_data = data.frame('random_sample' = 1:(ncol(signif_mat)-1), 'tot_signif_genes' = colSums(signif_mat[,-1]))
+
+summary(plot_data$tot_signif_genes)
+
+ggplotly(plot_data %>% ggplot(aes(tot_signif_genes)) + 
+         geom_histogram(alpha=0.5, color='#009999', fill='#009999', binwidth = 300) + 
+         geom_vline(xintercept=mean(plot_data$tot_signif_genes), color = 'gray') + 
+         xlab('Total number of DE genes in random sample') + theme_minimal())
+
+```
+
+#### Number of times each gene was found to be DE
+```{r, warning=FALSE, message=FALSE}
+plot_data = data.frame('Gene' = signif_mat$ID, 'n_times_DE' = rowSums(signif_mat[,-1])) %>%
+            arrange(n_times_DE)
+
+summary(plot_data$n_times_DE)
+
+ggplotly(plot_data %>% ggplot(aes(n_times_DE)) + geom_histogram(alpha=0.5, color='#cc0066', fill='#cc0066') + 
+         geom_vline(xintercept=mean(plot_data$n_times_DE), color = 'gray') + 
+         xlab('Number of times each gene was found to be DE in a sample') + theme_minimal())
+
+```
+
+#### Number of genes found to be DE in at least n random samples
+
+```{r}
+plot_data = plot_data %>% group_by(n_times_DE) %>% tally() %>% arrange(desc(n_times_DE)) %>% 
+            mutate('cum_DE_genes' = cumsum(n)) %>% arrange(n_times_DE)
+
+ggplotly(plot_data %>% ggplot(aes(n_times_DE, cum_DE_genes)) + geom_point(shape='o', alpha=1, color='#cc0066') + 
+         xlab('No. times a gene is found DE') + ylab('Number of genes found to be DE at least that number of times') + 
+         theme_minimal())
+```
+
+
+

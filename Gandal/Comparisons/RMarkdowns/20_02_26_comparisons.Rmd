@@ -1,0 +1,127 @@
+---
+title: 'Comparison Between Experiments'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+```{r load_packages, echo=TRUE, include=FALSE}
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(plotlyutils)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally) ; library(ggExtra) ; library(ggpubr)
+library(VennDiagram) ; library(venneuler)
+library(biomaRt)
+library(expss)
+library(knitr)
+```
+
+```{r load_datasets}
+
+###################################################################################################
+# Gene Expression data
+
+# All Regions
+load('./../../AllRegions/Data/preprocessed_data.RData')
+datExpr_all = datExpr %>% data.frame
+DE_info_all = DE_info %>% data.frame
+datMeta_full = datMeta %>% dplyr::select(-matches('SV|Picard'))
+
+# Frontal
+load('./../../Frontal/Data/preprocessed_data.RData')
+datExpr_frontal = datExpr %>% data.frame
+DE_info_frontal = DE_info %>% data.frame
+datMeta = datMeta %>% dplyr::select(-matches('SV|Picard'))
+datMeta_full = rbind(datMeta_full, datMeta) %>% distinct(Sample_ID, .keep_all = TRUE)
+
+# Occipital
+load('./../../Occipital/Data/preprocessed_data.RData')
+datExpr_occipital = datExpr %>% data.frame
+DE_info_occipital = DE_info %>% data.frame
+datMeta = datMeta %>% dplyr::select(-matches('SV|Picard'))
+datMeta_full = rbind(datMeta_full, datMeta) %>% distinct(Sample_ID, .keep_all = TRUE)
+
+###################################################################################################
+
+# SFARI Genes
+SFARI_genes = read_csv('./../../../SFARI/Data/SFARI_genes_08-29-2019_w_ensembl_IDs.csv')
+SFARI_genes = SFARI_genes[!duplicated(SFARI_genes$ID) & !is.na(SFARI_genes$ID),]
+
+###################################################################################################
+
+# GO Neuronal annotations: regex 'neuron' in GO functional annotations and label the genes that make a match as neuronal
+GO_annotations = read.csv('./../../AllRegions/Data/genes_GO_annotations.csv')
+GO_neuronal = GO_annotations %>% filter(grepl('neuron', go_term)) %>% 
+              mutate('ID'=as.character(ensembl_gene_id)) %>% 
+              dplyr::select(-ensembl_gene_id) %>% distinct(ID) %>%
+              mutate('Neuronal'=1)
+
+rm(GO_annotations, datMeta, datExpr, datGenes, dds, DE_info)
+```
+
+### Pool of Genes
+
+The genes studied in each experiment were very similar
+```{r}
+all_genes = unique(c(rownames(datExpr_all), rownames(datExpr_frontal), rownames(datExpr_occipital)))
+genes_df = data.frame('All' = all_genes %in% rownames(DE_info_all),
+                      'Fro' = all_genes %in% rownames(DE_info_frontal),
+                      'Occ' = all_genes %in% rownames(DE_info_occipital))
+
+cat(paste0('Total number of genes: ', nrow(genes_df)))
+
+plot(venneuler(genes_df))
+```
+
+
+```{r, fig.width=5, fig.height=5}
+grid.newpage()
+grid.draw(draw.triple.venn(sum(genes_df$All), sum(genes_df$Fro), sum(genes_df$Occ),
+                           sum(genes_df$All*genes_df$Fro), sum(genes_df$Occ*genes_df$Fro), sum(genes_df$All*genes_df$Occ),
+                           sum(genes_df$All*genes_df$Fro*genes_df$Occ),
+          category = c('AllRegions', 'Frontal', 'Occipital'), 
+          fill = hcl(h=seq(15, 375, length=4), l=65, c=100)[-4], fontfamily = rep('sans-serif',7),
+          alpha = rep(0.25,3), lty = rep('blank', 3), cat.fontfamily = rep('sans-serif',3)))
+
+```
+
+DE Genes
+
+```{r}
+
+genes_df = data.frame('All' = all_genes %in% rownames(DE_info_all)[DE_info_all$padj<0.05],
+                      'Fro' = all_genes %in% rownames(DE_info_frontal)[DE_info_frontal$padj<0.05],
+                      'Occ' = all_genes %in% rownames(DE_info_occipital)[DE_info_occipital$padj<0.05])
+rownames(genes_df) = all_genes
+genes_df = genes_df[genes_df$All+genes_df$Fro+genes_df$Occ>0,]
+
+cat(paste0('Total number of DE genes: ', nrow(genes_df)))
+
+plot(venneuler(genes_df))
+ 
+```
+
+```{r, fig.width=5, fig.height=5}
+grid.newpage()
+grid.draw(draw.triple.venn(sum(genes_df$All), sum(genes_df$Fro), sum(genes_df$Occ),
+                           sum(genes_df$All*genes_df$Fro), sum(genes_df$Occ*genes_df$Fro), sum(genes_df$All*genes_df$Occ),
+                           sum(genes_df$All*genes_df$Fro*genes_df$Occ),
+          category = c('AllRegions', 'Frontal', 'Occipital'), 
+          fill = hcl(h=seq(15, 375, length=4), l=65, c=100)[-4], fontfamily = rep('sans-serif',7),
+          alpha = rep(0.25,3), lty = rep('blank', 3), cat.fontfamily = rep('sans-serif',3)))
+
+```
+
+```{r}
+getinfo = c('ensembl_gene_id','external_gene_id')
+mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl', host='feb2014.archive.ensembl.org')
+common_DE_genes = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), 
+                        values=rownames(genes_df)[genes_df$All*genes_df$Fro*genes_df$Occ>0],
+                        mart=mart)
+
+common_DE_genes = common_DE_genes %>% dplyr::rename('gene_symbol' = 'external_gene_id') %>%
+                  left_join(SFARI_genes, by=c('ensembl_gene_id'='ID')) %>%
+                  dplyr::select(ensembl_gene_id, gene_symbol, `gene-score`, syndromic)
+
+kable(common_DE_genes, caption = 'Genes found to be DE in all three experiments')
+```
+
+
