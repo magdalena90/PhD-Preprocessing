@@ -105,7 +105,7 @@ Following the **scale-free topology criterion** because metabolic networks have 
 
 **Note:** Including non-integer powers in the parameters. Integer powers are usually used for this but there's no reason why you can't use a non-integer power and you can get a lower power vector that is above the 0.8 threshold so you don't affect the data that much
 
-```{r}
+```{r best_power}
 allowWGCNAThreads()
 
 best_power = datExpr %>% t %>% pickSoftThreshold(powerVector = seq(1,4,0.2), RsquaredCut=0.8)
@@ -124,7 +124,7 @@ S_sft = datExpr %>% t %>% adjacency(type='signed hybrid', power=best_power$power
 
 Using topological overlap dissimilarity measure because it has been found to result in biologically meaningful modules
 
-```{r}
+```{r TOM}
 TOM = S_sft %>% TOMsimilarity
 rownames(TOM) = rownames(S_sft)
 colnames(TOM) = colnames(S_sft)
