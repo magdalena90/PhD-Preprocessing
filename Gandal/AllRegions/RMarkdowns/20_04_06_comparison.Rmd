@@ -10,13 +10,10 @@ output:
 
 library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(dendextend)
 library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally)
-library(expss)
-library(polycor)
-library(foreach) ; library(doParallel)
-library(knitr)
+library(VennDiagram) ; library(venneuler)
+library(knitr) ; library(expss)
 library(biomaRt)
 library(anRichment) ; library(BrainDiseaseCollection)
-suppressWarnings(suppressMessages(library(WGCNA)))
 
 SFARI_colour_hue = function(r) {
   pal = c('#FF7631','#FFB100','#E8E328','#8CC83F','#62CCA6','#59B9C9','#b3b3b3','#808080','gray','#d9d9d9')[r]
@@ -36,24 +33,10 @@ GO_neuronal = GO_annotations %>% filter(grepl('neuron', go_term)) %>%
 SFARI_genes = read_csv('./../../../SFARI/Data/SFARI_genes_08-29-2019_w_ensembl_IDs.csv')
 SFARI_genes = SFARI_genes[!duplicated(SFARI_genes$ID) & !is.na(SFARI_genes$ID),]
 
-# Add gene symbol
-getinfo = c('ensembl_gene_id','external_gene_id')
-mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl',
-               host='feb2014.archive.ensembl.org') ## Gencode v19
-gene_names = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=genes_info$ID, mart=mart)
-
-
-################################################################################
-# Original dataset
-load('./../Data/preprocessed_data.RData')
-datExpr_orig = datExpr %>% data.frame
-DE_info_orig = DE_info %>% data.frame
-datMeta_orig = datMeta %>% data.frame
-
-# Update DE_info with Neuronal information
-DE_info_orig = DE_info_orig %>% mutate('ID'=rownames(.)) %>% left_join(GO_neuronal, by='ID') %>%
-  mutate(Neuronal=ifelse(is.na(Neuronal), 0, Neuronal)) %>%
-  mutate(significant=padj<0.05 & !is.na(padj))
+# Gupta
+load('./../../../Gupta/AllRegions/Data/preprocessed_data.RData')
+DE_info_Gupta = DE_info %>% data.frame %>% mutate('ID' = rownames(datExpr), 'significant' = padj<0.05) %>%
+          dplyr::select(ID, log2FoldChange, padj, significant)
 
 
 ################################################################################
@@ -61,7 +44,7 @@ DE_info_orig = DE_info_orig %>% mutate('ID'=rownames(.)) %>% left_join(GO_neuron
 load('./../Data/preprocessed_data_imputed.RData')
 datExpr_imp = datExpr %>% data.frame
 DE_info_imp = DE_info %>% data.frame
-datMeta_imp = datMeta %>% data.frame
+datMeta_imp = datMeta
 
 # Update DE_info with Neuronal information
 DE_info_imp = DE_info_imp %>% mutate('ID'=rownames(.)) %>% left_join(GO_neuronal, by='ID') %>%
@@ -69,8 +52,317 @@ DE_info_imp = DE_info_imp %>% mutate('ID'=rownames(.)) %>% left_join(GO_neuronal
   mutate(significant=padj<0.05 & !is.na(padj))
 
 
-rm(GO_annotations, datExpr, DE_info, datMeta, datGenes)
+################################################################################
+# Original dataset
+load('./../Data/preprocessed_data.RData')
+datExpr_orig = datExpr %>% data.frame
+DE_info_orig = DE_info %>% data.frame
+datMeta_orig = datMeta
+
+# Update DE_info with Neuronal information
+DE_info_orig = DE_info_orig %>% mutate('ID'=rownames(.)) %>% left_join(GO_neuronal, by='ID') %>%
+  mutate(Neuronal=ifelse(is.na(Neuronal), 0, Neuronal)) %>%
+  mutate(significant=padj<0.05 & !is.na(padj))
+
+
+# Add gene symbol
+getinfo = c('ensembl_gene_id','external_gene_id')
+mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl',
+               host='feb2014.archive.ensembl.org') ## Gencode v19
+gene_names = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=rownames(datExpr), mart=mart)
+
+
+rm(GO_annotations, datExpr, DE_info, datGenes, datMeta, dds, mart, getinfo)
 ```
+
+<br>
+
+## DE Genes
+
+<br>
+
+- The list of differentially expressed genes is very similar between the two preprocessing pipelines
+
+- **Genes that lost their DE tag:** As we saw in 20_03_11_z_score_outlier_methods.html, most of the outlier values in this dataset belonged to ASD samples, which could have created false positives in the DEA
+
+- **Genes that gained their DE tag:** By cleaning the outlier values, subtle differences may have been significant enough for the algorithm to capture now that were hidden by the outlier values before
+
+```{r}
+all_genes = unique(c(rownames(datExpr_orig), rownames(datExpr_imp)))
+
+genes_df = data.frame('Original' = all_genes %in% DE_info_orig$ID[DE_info_orig$significant],
+                      'Imputed' = all_genes %in% DE_info_imp$ID[DE_info_imp$significant],
+                      'Gupta' = all_genes %in% DE_info_Gupta$ID[DE_info_Gupta$significant])
+rownames(genes_df) = all_genes
+
+table_info = genes_df %>% apply_labels(Original = 'Original', Imputed = 'Imputed')
+
+cro(table_info$Original, list(table_info$Imputed, total()))
+
+rm(table_info, all_genes)
+```
+
+```{r, fig.width=5, fig.height=5}
+grid.newpage()
+grid.draw(draw.pairwise.venn(sum(genes_df$Original), sum(genes_df$Imputed), sum(genes_df$Original & genes_df$Imputed),
+          category = c('Original', 'Imputed'), fill = c('#e6b800', '#0099cc'),
+          fontfamily = rep('sans-serif',3), alpha = rep(0.25,2), lty = rep('blank', 2),
+          cat.fontfamily = rep('sans-serif',2)))
+```
+
+<br>
+
+### Comparison to Gupta's DEA
+
+<br>
+
+To see if the genes that are losing/gaining the label of DE have a true biological signal I'm going to look them up in Gupta's list of DE genes.
+
+Any match between datasets is considered to be evidence of the true DE of the gene, since it would be unlikely for a gene to be identified as DE in two different datasets because of unrelated technical problems.
+
+<br>
+
+**Lost DE genes**
+
+It's not necessarily bad to lose DE genes, it would only be a problem if these genes truly contained biological signals related to ASD.
+
+```{r}
+cat(paste0(sum(genes_df$Gupta[genes_df$Original & !genes_df$Imputed]), '/', sum(genes_df$Original & !genes_df$Imputed),
+           ' of the genes which are no longer DE were identified as DE in Gupta\'s dataset (',
+           round(100*mean(genes_df$Gupta[genes_df$Original & !genes_df$Imputed]),2),'%)'))
+```
+
+<br>
+
+**Gained DE genes**
+
+Similarly, even though it would seem a positive thing to gain new DE genes, it's only good when the genes contain real biological signal related to ASD.
+
+```{r}
+cat(paste0(sum(genes_df$Gupta[!genes_df$Original & genes_df$Imputed]), '/', sum(!genes_df$Original & genes_df$Imputed),
+           ' of the genes which are now DE are also considered to be DE in Gupta\'s dataset (',
+           round(100*mean(genes_df$Gupta[!genes_df$Original & genes_df$Imputed]),2),'%)'))
+```
+
+<br>
+
+The matches to Gupta's dataset are quite small, so they may not be very robust, but it seems like we are losing more biological information than we are gaining from this new preprocessing pipeline!
+
+I'm going to try to understand what happend to the gained/lost genes that are also in Gupta's dataset to see if I can understand where the problem is
+
+<br>
+
+```{r calc_max_z_score_metrics, warning=FALSE, message=FALSE}
+datExpr_raw = read.csv('./../Data/RNAseq_ASD_datExpr.csv', row.names=1)
+datExpr_raw = datExpr_raw[rownames(datExpr_raw) %in% rownames(datExpr_imp), colnames(datExpr_raw) %in% colnames(datExpr_imp)]
+
+z_scores = z_scores = datExpr_raw %>% apply(1, function(x) abs(x-mean(x))/sd(x)) %>% t %>% data.frame
+
+max_z_scores = data.frame('ID' = rownames(datExpr_raw),
+                          'max_z_score' = apply(z_scores, 1, max)) %>%
+               mutate('n_outliers' = apply(z_scores, 1, function(x) sum(x > mean(max_z_score) + 3*sd(max_z_score))))
+
+outliers = which(max_z_scores$n_outliers>0)
+
+max_z_scores$imputed_values = 0
+
+datExpr = datExpr_raw
+datMeta = datMeta_imp
+
+for(i in outliers){
+  max_score = abs(max(abs(datExpr[i,]-mean(datExpr[i,]))/sd(datExpr[i,]))-mean(max_z_scores$max_z_score))/sd(max_z_scores$max_z_score)
+  
+  while(max_score > 3){
+    sample = gsub('X','',names(which.max(abs(datExpr[i,]-mean(datExpr[i,]))/sd(datExpr[i,]))))
+    diagnosis = datMeta$Diagnosis[datMeta$Dissected_Sample_ID == sample] %>% as.character
+    columns = datMeta$Dissected_Sample_ID[datMeta$Diagnosis == diagnosis & datMeta$Dissected_Sample_ID != sample]
+    datExpr[i,paste0('X',sample)] = datExpr[i, paste0('X',columns)] %>% mean %>% round
+    
+    max_z_scores$imputed_values[i] = max_z_scores$imputed_values[i] + 1
+    
+    # Prepare for next round
+    max_score = abs(max(abs(datExpr[i,]-mean(datExpr[i,]))/sd(datExpr[i,]))-mean(max_z_scores$max_z_score))/sd(max_z_scores$max_z_score)
+  }
+}
+
+genes_df = genes_df %>% mutate('ID' = rownames(datExpr_imp)) %>% left_join(max_z_scores, by = 'ID')
+
+rm(datExpr, datMeta, z_scores, i, outliers, max_score, sample, diagnosis, columns, datExpr_raw)
+```
+
+<br><br>
+
+#### Lost Genes
+
+```{r}
+lost_genes = genes_df %>% filter(Original & !Imputed & Gupta) %>% left_join(gene_names, by = c('ID'='ensembl_gene_id'))
+
+cat(paste0('Of the ', nrow(lost_genes), ' genes we lost from Gupta\'s DE genes, ',
+           sum(lost_genes$imputed_values>0), ' had had their max value imputed, which means that the other ',
+           sum(lost_genes$imputed_values==0), ' genes lost their DE tag because of the samples we identified as outliers and removed.'))
+```
+
+```{r, warning=FALSE, message=FALSE}
+plot_function = function(genes_list, i){
+  
+  i = 3*i-2
+  last_j = 3
+  plot_list = list()
+  
+  for(j in 1:last_j){
+    
+    ID = genes_list$ID[i+j-1]
+    
+    if(!is.na(ID)){
+      plot_data = data.frame('Sample' = colnames(datExpr_raw), 'expr' = datExpr_raw[ID,] %>% t, 'Diagnosis' = datMeta_orig$Diagnosis,
+                             'removed_sample' = !colnames(datExpr_raw) %in% colnames(datExpr_imp)) %>%
+                  mutate('shape' = ifelse(removed_sample, 4,16), Sample = as.character(Sample)) %>%
+                  mutate('alpha' = ifelse(shape==16,0.6,1))
+      colnames(plot_data)[2] = 'expr'
+      
+      # See if any value was imputed
+      datExpr_filtered = datExpr_raw[,colnames(datExpr_raw) %in% colnames(datExpr_imp)]
+      if(genes_list$imputed_values[i+j-1] > 0){
+        
+        # Calculate imputed value
+        sample = gsub('X','',names(which.max(datExpr_filtered[ID,])))
+        diagnosis = datMeta_imp$Diagnosis[datMeta_imp$Dissected_Sample_ID == sample] %>% as.character
+        columns = datMeta_imp$Dissected_Sample_ID[datMeta_imp$Diagnosis == diagnosis & datMeta_imp$Dissected_Sample_ID != sample]
+        imp_value = datExpr_filtered[ID, paste0('X',columns)] %>% mean %>% round
+        
+        # Add imputed value to plot_data
+        new_row = c(paste0('X',sample), imp_value, diagnosis, FALSE, 16)
+        plot_data = rbind(plot_data, new_row)
+        plot_data = plot_data %>% mutate(shape = as.numeric(ifelse(Sample == paste0('X',sample), 18, shape)),
+                                         expr = as.numeric(expr), Sample = as.factor(Sample),
+                                         alpha = ifelse(shape==16,0.6,1))
+      }
+      
+    # Create plot
+      ggp = plot_data %>% ggplot(aes(Sample, expr+1, color=Diagnosis)) + 
+                          geom_hline(yintercept = median(plot_data$expr[plot_data$Diagnosis=='ASD'])+1, color='#00BFC4') +
+                          geom_hline(yintercept = median(plot_data$expr[plot_data$Diagnosis=='CTL'])+1, color='#F8766D') +
+                          geom_point(alpha = plot_data$alpha, shape = plot_data$shape, lwd = plot_data$alpha*2) +
+                          theme_minimal() + scale_y_log10() +
+                          theme(legend.position='none', axis.text.x=element_blank(), axis.ticks.x=element_blank())
+      
+      if(sum(plot_data$removed_sample==TRUE)>0){
+        removed_samples = plot_data %>% dplyr::filter(removed_sample==TRUE) %>% 
+                          mutate(x = Sample, xend = Sample, y = expr, yend=median(plot_data$expr[plot_data$Diagnosis==Diagnosis]+1),
+                                 color = ifelse(Diagnosis=='ASD','#00BFC4','#F8766D'))
+        
+        ggp = ggp + geom_segment(data = removed_samples, aes(x=Sample, y=expr, xend=Sample, yend = yend),
+                                 color = removed_samples$color, linetype = 'dotted')
+
+        
+      }
+      
+      if(genes_list$imputed_values[i+j-1] > 0) {
+        ggp = ggp + geom_segment(aes(x=paste0('X',sample), y=expr[Sample==paste0('X',sample)][1], 
+                                                 xend = paste0('X',sample), yend = expr[Sample==paste0('X',sample)][2]),
+                                             alpha = 0.5, color = ifelse(diagnosis=='ASD','#00BFC4','#F8766D'))
+      }
+      plot_list[[j]] = ggplotly(ggp)
+      
+    } else last_j = j-1
+  }
+  
+  annotations = list()
+  for(j in 1:last_j) {
+    annotations[[j]] = list(x = 0.1+1/last_j*(j-1) , y = 1.05, text = genes_list$Gene[i+j-1],  
+                            showarrow = F, xref='paper', yref='paper')
+  }
+  
+  p = subplot(plot_list, nrows=1) %>% layout(annotations = annotations)
+  
+  return(p)
+}
+```
+
+**Lost genes with imputed values**
+
+```{r, warning=FALSE, message=FALSE, fig.height=3, fig.width=7}
+datExpr_raw = read.csv('./../Data/RNAseq_ASD_datExpr.csv', row.names=1)
+datExpr_raw = datExpr_raw[rownames(datExpr_raw) %in% rownames(datExpr_imp), colnames(datExpr_raw) %in% colnames(datExpr_orig)]
+
+genes_list = lost_genes %>% filter(imputed_values>0) %>% dplyr::rename('Gene' = external_gene_id)
+
+plot_function(genes_list, 1)
+
+rm(genes_list)
+```
+
+**Lost genes without imputed values**
+
+These genes lost their DE tag because of the removed samples
+
+Their adjusted p-value is still small but no longer below 0.05
+
+```{r}
+genes_list = lost_genes %>% filter(imputed_values==0) %>%
+                  left_join(DE_info_imp %>% dplyr::select(ID, log2FoldChange, padj), by = 'ID') %>%
+                  dplyr::rename('Gene' = external_gene_id, 'LFC_now' = log2FoldChange, 'pval_now' = padj) %>%
+                  left_join(DE_info_orig %>% dplyr::select(ID, log2FoldChange, padj), by = 'ID') %>%
+                  dplyr::rename('LFC_before' = log2FoldChange, 'pval_before' = padj)
+
+kable(genes_list %>% dplyr::select(Gene, LFC_before, LFC_now, pval_before, pval_now) %>% dplyr::arrange(desc(pval_now)))
+```
+
+It looks like the value belonging to the removed samples contained helpful information
+
+```{r, warning=FALSE, message=FALSE, fig.height=3, fig.width=10}
+plot_function(genes_list, 1)
+plot_function(genes_list, 2)
+plot_function(genes_list, 3)
+plot_function(genes_list, 4)
+plot_function(genes_list, 5)
+plot_function(genes_list, 6)
+plot_function(genes_list, 7)
+```
+
+```{r, warning=FALSE, message=FALSE, fig.height=3, fig.width=7}
+plot_function(genes_list, 8)
+```
+
+<br><br>
+
+#### Gained Genes
+
+```{r}
+gained_genes = genes_df %>% filter(!Original & Imputed & Gupta) %>% left_join(gene_names, by = c('ID'='ensembl_gene_id'))
+
+cat(paste0('Of the ', nrow(gained_genes), ' genes we gained from Gupta\'s DE genes, ',
+           sum(gained_genes$imputed_values>0), ' had had their max value imputed, which means that the other ',
+           sum(gained_genes$imputed_values==0), ' genes gained their DE tag because of the samples we identified as outliers and removed.'))
+```
+
+**Gained genes without imputed values**
+
+These genes gained their DE tag because of the removed samples
+
+Their adjusted p-value is were small from the beginning but above 0.05
+
+```{r}
+genes_list = gained_genes %>% filter(imputed_values==0) %>% 
+             left_join(DE_info_imp %>% dplyr::select(ID, log2FoldChange, padj), by = 'ID') %>%
+             dplyr::rename('Gene' = external_gene_id, 'LFC_now' = log2FoldChange, 'pval_now' = padj) %>%
+             left_join(DE_info_orig %>% dplyr::select(ID, log2FoldChange, padj), by = 'ID') %>%
+             dplyr::rename('LFC_before' = log2FoldChange, 'pval_before' = padj)
+
+kable(genes_list %>% dplyr::select(Gene, LFC_before, LFC_now, pval_before, pval_now) %>% dplyr::arrange(desc(pval_before)))
+```
+
+
+```{r, warning=FALSE, message=FALSE, fig.height=3, fig.width=10}
+plot_function(genes_list, 1)
+plot_function(genes_list, 2)
+plot_function(genes_list, 3)
+plot_function(genes_list, 4)
+plot_function(genes_list, 5)
+```
+
+
+
 
 
 

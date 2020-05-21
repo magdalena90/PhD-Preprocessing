@@ -129,6 +129,7 @@ TOM = S_sft %>% TOMsimilarity
 rownames(TOM) = rownames(S_sft)
 colnames(TOM) = colnames(S_sft)
 
+#library(igraph)
 #g = graph_from_adjacency_matrix(TOM, weighted=TRUE, mode='undirected')
 #edges = as_edgelist(g)
 #e = cbind(edges, E(g)$weight)

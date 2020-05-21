@@ -10,6 +10,7 @@ library(tidyverse)
 library(biomaRt)
 library(knitr)
 library(expss)
+library(knitr)
 ```
 
 <br>
@@ -26,7 +27,8 @@ library(expss)
 
 ```{r load_and_annotate_data, message=FALSE, warning=FALSE}
 # Load SFARI database
-SFARI_genes = read_csv('./../Data/SFARI_genes_08-29-2019.csv')
+#SFARI_genes = read_csv('./../Data/SFARI_genes_08-29-2019.csv')
+SFARI_genes = read_csv('./../Data/SFARI_genes_01-03-2020.csv')
 
 # Add Ensembl IDs
 
@@ -67,13 +69,13 @@ SFARI_genes = SFARI_genes %>% filter(!grepl('LRG_',ensembl_gene_id))
 
 <br>
 
-2. Genes that didn't get a match (only 2 in common with the previous BioMart version)
+2. Genes that didn't get a match (only 3 in common with the previous BioMart version)
 ```{r}
 print(paste0(sum(is.na(SFARI_genes$ID)),' Genes didn\'t return any matches: ', 
              paste(sort(SFARI_genes$`gene-symbol`[is.na(SFARI_genes$ID)]), collapse=', ')))
 ```
 
-If you look for their EnsemblID on Google they do come up (maybe it's something about the version of the BioMart I'm querying), so I'm going to annotate them manually
+If you look for their EnsemblID on Google two of them do come up (maybe it's something about the version of the BioMart I'm querying), so I'm going to annotate them manually
 ```{r manually_annotate_missing_genes}
 # Manually assign Ensembl IDs to the 15 genes
 SFARI_genes = SFARI_genes %>% mutate(ID = case_when(`gene-symbol`=='MSNP1AS'        ~ 'ENSG00000251593',
@@ -134,7 +136,7 @@ duplicated_genes = SFARI_genes$`gene-symbol`[duplicated(SFARI_genes$`gene-symbol
 print(paste0('There are ', length(duplicated_genes), ' genes with multiple Ensembl IDs'))
 
 SFARI_genes %>% dplyr::select(ID, `gene-symbol`, `gene-score`, syndromic, gene_biotype) %>% 
-      filter(`gene-symbol` %in% duplicated_genes) %>% arrange(`gene-symbol`, ID) %>% kable %>% kable_styling
+      filter(`gene-symbol` %in% duplicated_genes) %>% arrange(`gene-symbol`, ID) %>% kable# %>% kable_styling
 ```
 
 <br>
@@ -162,7 +164,7 @@ SFARI_genes %>% filter(`gene-symbol` %in% processed_transcripts) %>%
 
 ### Write results to .csv file
 ```{r write_to_file}
-write.csv(SFARI_genes, './../Data/SFARI_genes_08-29-2019_w_ensembl_IDs.csv', row.names=FALSE)
+write.csv(SFARI_genes, './../Data/SFARI_genes_01-03-2020_w_ensembl_IDs.csv', row.names=FALSE)
 ```
 
 <br><br>

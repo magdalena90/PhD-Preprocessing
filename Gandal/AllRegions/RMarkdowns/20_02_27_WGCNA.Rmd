@@ -113,7 +113,7 @@ best_power = datExpr %>% t %>% pickSoftThreshold(powerVector = seq(1,4,0.2), Rsq
 print(paste0('Best power for scale free topology: ', best_power$powerEstimate))
 ```
 
-```{r create_adj_mat, include=FALSE}
+```{r create_adj_mat}
 S_sft = datExpr %>% t %>% adjacency(type='signed hybrid', power=best_power$powerEstimate, corFnc='bicor')
 ```
 <br><br>
@@ -129,6 +129,7 @@ TOM = S_sft %>% TOMsimilarity
 rownames(TOM) = rownames(S_sft)
 colnames(TOM) = colnames(S_sft)
 
+#library(igraph)
 #g = graph_from_adjacency_matrix(TOM, weighted=TRUE, mode='undirected')
 #edges = as_edgelist(g)
 #e = cbind(edges, E(g)$weight)
