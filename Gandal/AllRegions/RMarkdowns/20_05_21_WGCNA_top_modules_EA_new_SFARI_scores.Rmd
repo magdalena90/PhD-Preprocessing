@@ -68,6 +68,9 @@ genes_info$Module = genes_info[,clustering_selected]
 dataset = read.csv(paste0('./../Data/dataset_', clustering_selected, '.csv'))
 dataset$Module = dataset[,clustering_selected]
 
+# Correct SFARI Scores
+dataset$gene.score = genes_info$gene.score
+
 
 SFARI_colour_hue = function(r) {
   pal = c('#FF7631','#FFB100','#E8E328','#b3b3b3','#808080','gray','#d9d9d9')[r]
@@ -196,9 +199,10 @@ create_plot = function(module){
   colnames(plot_data)[2] = 'Module'
   
   SFARI_colors = as.numeric(names(table(as.character(plot_data$gene.score)[plot_data$gene.score!='None'])))
+  SFARI_colors = SFARI_colors[!is.na(SFARI_colors)]
   
   p = ggplotly(plot_data %>% ggplot(aes(Module, GS, color=gene.score)) + geom_point(alpha=0.5, aes(ID=ID)) + ylab('Gene Significance') +
-               scale_color_manual(values=SFARI_colour_hue(r=c(SFARI_colors,8))) + theme_minimal() + xlab('Module Membership') +
+               scale_color_manual(values=SFARI_colour_hue(r=c(SFARI_colors,5,6))) + theme_minimal() + xlab('Module Membership') +
                ggtitle(paste0('Module ', module,'  (MTcor = ', round(moduleTraitCor[paste0('ME',module),1],2),')')))
   
   return(p)
@@ -465,53 +469,57 @@ Using the package [anRichment](https://peterlangfelder.com/2018/11/25/functional
 
 - It's not on CRAN nor in Bioconductor
 
-```{r, warning=FALSE}
-# Prepare dataset
-
-# Create dataset with top modules membership and removing the genes without an assigned module
-EA_dataset = data.frame('ensembl_gene_id' = genes_info$ID,
-                        module = ifelse(genes_info$Module %in% top_modules, genes_info$Module, 'other')) %>%
-             filter(genes_info$Module!='gray')
-
-# Assign Entrez Gene Id to each gene
-getinfo = c('ensembl_gene_id','entrezgene')
-mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl', host='feb2014.archive.ensembl.org')
-biomart_output = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=EA_dataset$ensembl_gene_id, mart=mart)
-
-EA_dataset = EA_dataset %>% left_join(biomart_output, by='ensembl_gene_id')
-
-for(tm in top_modules){
-  cat(paste0('\n',sum(EA_dataset$module==tm & is.na(EA_dataset$entrezgene)), ' genes from top module ',
-             tm, ' don\'t have an Entrez Gene ID')) 
-}
-
-rm(getinfo, mart, biomart_output, tm)
-```
-
 ```{r enrichment_analysis, warning=FALSE}
+file_name = './../Data/enrichmentAnalysis.RData'
 
-# Manual: https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/GeneAnnotation/Tutorials/anRichment-Tutorial1.pdf
-
-collectGarbage()
-
-# EA_dataset = rbind(EA_dataset[EA_dataset$module!='other',], EA_dataset[EA_dataset$module=='other',][sample(sum(EA_dataset$module=='other'), 1000),])
-
-# Prepare datasets
-GO_col = buildGOcollection(organism = 'human', verbose = 0)
-internal_col = internalCollection(organism = 'human')
-MillerAIBS_col = MillerAIBSCollection(organism = 'human')
-BrainDisease_col = BrainDiseaseCollection(organism = 'human')
-combined_col = mergeCollections(GO_col, internal_col, MillerAIBS_col, BrainDisease_col)
-
-# Print collections used
-cat('Using collections: ')
-knownGroups(combined_col, sortBy = 'size')
-
-# Perform Enrichment Analysis
-enrichment = enrichmentAnalysis(classLabels = EA_dataset$module, identifiers = EA_dataset$entrezgene,
-                                refCollection = combined_col, #useBackground = 'given', 
-                                threshold = 1e-4, thresholdType = 'Bonferroni',
-                                getOverlapEntrez = FALSE, getOverlapSymbols = TRUE)
+if(file.exists('./../Data/enrichmentAnalysis.RData')){
+  load(file_name)
+} else {
+  # Prepare dataset
+  # Create dataset with top modules membership and removing the genes without an assigned module
+  EA_dataset = data.frame('ensembl_gene_id' = genes_info$ID, module = genes_info$Module)  %>%
+               filter(genes_info$Module!='gray')
+  
+  # Assign Entrez Gene Id to each gene
+  getinfo = c('ensembl_gene_id','entrezgene')
+  mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl', host='feb2014.archive.ensembl.org')
+  biomart_output = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=EA_dataset$ensembl_gene_id, mart=mart)
+  
+  EA_dataset = EA_dataset %>% left_join(biomart_output, by='ensembl_gene_id')
+  
+  for(tm in top_modules){
+    cat(paste0('\n',sum(EA_dataset$module==tm & is.na(EA_dataset$entrezgene)), ' genes from top module ',
+               tm, ' don\'t have an Entrez Gene ID')) 
+  }
+  
+  rm(getinfo, mart, biomart_output, tm)
+  
+  # Manual: https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/GeneAnnotation/Tutorials/anRichment-Tutorial1.pdf
+  
+  collectGarbage()
+  
+  # EA_dataset = rbind(EA_dataset[EA_dataset$module!='other',], EA_dataset[EA_dataset$module=='other',][sample(sum(EA_dataset$module=='other'), 1000),])
+  
+  # Prepare datasets
+  GO_col = buildGOcollection(organism = 'human', verbose = 0)
+  internal_col = internalCollection(organism = 'human')
+  MillerAIBS_col = MillerAIBSCollection(organism = 'human')
+  BrainDisease_col = BrainDiseaseCollection(organism = 'human')
+  combined_col = mergeCollections(GO_col, internal_col, MillerAIBS_col, BrainDisease_col)
+  
+  # Print collections used
+  cat('Using collections: ')
+  knownGroups(combined_col, sortBy = 'size')
+  
+  # Perform Enrichment Analysis
+  enrichment = enrichmentAnalysis(classLabels = EA_dataset$module, identifiers = EA_dataset$entrezgene,
+                                  refCollection = combined_col, #useBackground = 'given', 
+                                  threshold = 1e-4, thresholdType = 'Bonferroni',
+                                  getOverlapEntrez = FALSE, getOverlapSymbols = TRUE)
+  
+  # Save enrichment results
+  save(enrichment, file=file_name)
+}
 
 ```
 
@@ -556,12 +564,6 @@ kable(enrichment$enrichmentTable %>% filter(class==top_modules[4]) %>%
 
 ```
 
-Save Enrichment Analysis results
-```{r}
-save(enrichment, file='./../Data/enrichmentAnalysis.RData')
-#load('./../Data/enrichmentAnalysis.RData')
-```
-
 
 <br>
 
@@ -575,16 +577,16 @@ save(enrichment, file='./../Data/enrichmentAnalysis.RData')
 
 **Option 1:** Select the modules with the highest percentage of SFARI Genes
 
-- This is an easy approach but it doesn't take into account the size of the modules (the bigger the module, the more robust the result)
+- This is an easy approach but it doesn't take into account the size of the modules (the bigger the module, the more robust the result), and since our top modules are quite small (40 and 174) this could be a problem
 
 - Perhaps an approach that incorporates the cluster size into the selection criteria would be better
 
 ```{r, warning=FALSE, fig.width=10}
 # Prepare dataset
-perc_SFARI_genes = dataset %>% mutate('hasSFARIscore' = gene.score!='None') %>% 
-                   group_by(Module, MTcor, hasSFARIscore) %>% summarise(p=n()) %>% 
+perc_SFARI_genes = dataset %>% mutate('hasSFARIscore' = !gene.score %in% c('None', 'Neuronal')) %>% 
+                   group_by(Module, MTcor, hasSFARIscore) %>% summarise(s=n()) %>% 
                    left_join(dataset %>% group_by(Module) %>% summarise(n=n()), by='Module') %>% 
-                   mutate(p=round(p/n*100,2)) %>% filter(hasSFARIscore & Module != 'gray') %>% arrange(desc(p))
+                   mutate(p=round(s/n*100,2)) %>% filter(hasSFARIscore & Module != 'gray') %>% arrange(desc(p))
 
 perc_SFARI_genes %>% ggplot(aes(reorder(Module, -p), p)) + geom_bar(stat='identity', fill = perc_SFARI_genes$Module) + 
                      xlab('Module') + ylab('% of SFARI Genes') + theme_minimal() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
@@ -594,57 +596,65 @@ keep_modules = perc_SFARI_genes$Module[1:2]
 cat(paste0('Keeping top 2 modules: ', paste(keep_modules, collapse = ', ')))
 ```
 
-**Option 2:** Assume independence between SFARI Genes and modules and calculate the probability distribution of 
+**Option 2:** Assume independence between SFARI Genes and modules and calculate the probability of obtaining a proportion at least as big as the one found in each cluster given its size
 
+<br>
 
+Notation:
 
+- N = Number of genes (16147)
 
-```{r, warning=FALSE}
-# Create dataset with top modules membership and removing the genes without an assigned module
-EA_dataset = data.frame('ensembl_gene_id' = genes_info$ID,
-                        module = ifelse(genes_info$Module %in% keep_modules, genes_info$Module, 'other')) %>%
-                        filter(genes_info$Module!='gray')
+- S = Number of SFARI genes (789)
 
-# Assign Entrez Gene Id to each gene
-getinfo = c('ensembl_gene_id','entrezgene')
-mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl', host='feb2014.archive.ensembl.org')
-biomart_output = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=EA_dataset$ensembl_gene_id, mart=mart)
+- For each cluster C:
 
-EA_dataset = EA_dataset %>% left_join(biomart_output, by='ensembl_gene_id')
+  - n = Number of genes in cluster
+  
+  - s = Number of SFARI Genes in cluster
+  
+<br>
 
-for(tm in keep_modules){
-  cat(paste0('\n',sum(EA_dataset$module==tm & is.na(EA_dataset$entrezgene)), ' genes from top module ',
-             tm, ' don\'t have an Entrez Gene ID')) 
+If we interpret the number of genes ($n$) in a cluster as $n$ random draws without replacement from a finite population of size $N$, and the number of SFARI genes in the cluster ($k$) as $k$ successes in those $n$ draws, where we know that $N$ contains exactly $K$ successes, then we can use the hypergeometric distribution to calculate the statistical significance of having drawn $k$ successes out of $n$ draws, and use this value to select the clusters with the highest statistical significance
+
+We want to select the modules with the smallest probability, since this means that the probability of obtaining at least this number of SFARI genes by chance is small (the )
+
+**Note:** Instead of calculating the probability we are using the log probability to differentiate better between the smallest probabilities
+
+```{r warning=FALSE, message=FALSE}
+
+N = sum(perc_SFARI_genes$n)
+S = sum(perc_SFARI_genes$s)
+
+calc_prob = function(row){
+  s = row[4] %>% as.numeric
+  n = row[5] %>% as.numeric
+  prob = phyper(s,S,N-S,n, log.p = TRUE, lower.tail=FALSE)
+  return(prob)
 }
 
-rm(getinfo, mart, biomart_output, tm)
+perc_SFARI_genes$prob = apply(perc_SFARI_genes, 1, function(x) calc_prob(x))
+perc_SFARI_genes = perc_SFARI_genes %>% arrange(prob)
+
+perc_SFARI_genes %>% ggplot(aes(MTcor, prob, size=n)) + geom_point(color=perc_SFARI_genes$Module, alpha=0.5) + geom_smooth(color='#cccccc', se=FALSE) + 
+                     xlab('Module-Trait Correlation') + ylab('Hypergeometric (log)Probability') + theme_minimal() + theme(legend.position = 'none')
 ```
 
-```{r enrichment_analysis_SFARI, warning=FALSE}
+We are no longer selecting the modules with the highest percentage of SFARI genes, but instead we are pondering this by the size of the module
 
-# Manual: https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/GeneAnnotation/Tutorials/anRichment-Tutorial1.pdf
+In the end we are keeping cluster #B79F00 as a top cluster but we are replacing #8195FF for #FE61CF, which has a lower percentage of SFARI genes but is a bigger cluster
 
-collectGarbage()
+```{r message=FALSE, warning=FALSE, fig.width=10}
+perc_SFARI_genes %>% ggplot(aes(p, prob, size=n)) + geom_point(color=perc_SFARI_genes$Module, alpha=0.5) + geom_smooth(color='#cccccc', se=FALSE) + 
+                     xlab('% of SFARI Genes') + ylab('Hypergeometric (log)Probability') + theme_minimal() + theme(legend.position = 'none')
 
-# EA_dataset = rbind(EA_dataset[EA_dataset$module!='other',], EA_dataset[EA_dataset$module=='other',][sample(sum(EA_dataset$module=='other'), 1000),])
+perc_SFARI_genes %>% ggplot(aes(reorder(Module, prob), prob)) + geom_bar(stat='identity', fill = perc_SFARI_genes$Module) + 
+                     xlab('Module') + ylab('(Hypergeometric (log)Probability') + theme_minimal() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
 
-# Prepare datasets
-GO_col = buildGOcollection(organism = 'human', verbose = 0)
-internal_col = internalCollection(organism = 'human')
-MillerAIBS_col = MillerAIBSCollection(organism = 'human')
-BrainDisease_col = BrainDiseaseCollection(organism = 'human')
-combined_col = mergeCollections(GO_col, internal_col, MillerAIBS_col, BrainDisease_col)
+keep_modules = perc_SFARI_genes$Module[1:2]
 
-# Print collections used
-cat('Using collections: ')
-knownGroups(combined_col, sortBy = 'size')
+cat(paste0('Keeping top 2 modules: ', paste(keep_modules, collapse = ', ')))
 
-# Perform Enrichment Analysis
-enrichment = enrichmentAnalysis(classLabels = EA_dataset$module, identifiers = EA_dataset$entrezgene,
-                                refCollection = combined_col, #useBackground = 'given', 
-                                threshold = 1e-4, thresholdType = 'Bonferroni',
-                                getOverlapEntrez = FALSE, getOverlapSymbols = TRUE)
-
+rm(N,S,calc_prob)
 ```
 
 <br>
@@ -672,11 +682,6 @@ kable(enrichment$enrichmentTable %>% filter(class==keep_modules[2]) %>%
 
 ```
 
-Save Enrichment Analysis results
-```{r}
-save(enrichment, file='./../Data/enrichmentAnalysis_SFARI.RData')
-#load('./../Data/enrichmentAnalysis.RData')
-```
 
 <br><br>
 

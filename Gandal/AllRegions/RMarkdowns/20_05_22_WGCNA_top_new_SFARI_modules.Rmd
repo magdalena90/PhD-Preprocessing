@@ -1,0 +1,321 @@
+---
+title: 'Exploratory Analysis of Modules with highest New SFARI Genes significance'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+```{r load_packages, warning=FALSE, message=FALSE}
+#setwd('/afs/inf.ed.ac.uk/user/s17/s1725186/Documents/PhD-Models/FirstPUModel/RMarkdowns')
+
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(dendextend)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally)
+library(expss)
+library(polycor)
+library(foreach) ; library(doParallel)
+library(knitr)
+library(biomaRt)
+library(anRichment) ; library(BrainDiseaseCollection)
+suppressWarnings(suppressMessages(library(WGCNA)))
+```
+
+Load preprocessed dataset (preprocessing code in 19_10_14_data_preprocessing.Rmd) and clustering (pipeline in 19_10_21_WGCNA.Rmd)
+```{r load_dataset, message=FALSE, warning=FALSE}
+
+# Gandal dataset
+load('./../Data/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+DE_info = DE_info %>% data.frame
+
+
+# GO Neuronal annotations: regex 'neuron' in GO functional annotations and label the genes that make a match as neuronal
+GO_annotations = read.csv('./../Data/genes_GO_annotations.csv')
+GO_neuronal = GO_annotations %>% filter(grepl('neuron', go_term)) %>% 
+              mutate('ID'=as.character(ensembl_gene_id)) %>% 
+              dplyr::select(-ensembl_gene_id) %>% distinct(ID) %>%
+              mutate('Neuronal'=1)
+
+
+# SFARI Genes
+SFARI_genes = read_csv('./../../../SFARI/Data/SFARI_genes_01-03-2020_w_ensembl_IDs.csv')
+SFARI_genes = SFARI_genes[!duplicated(SFARI_genes$ID) & !is.na(SFARI_genes$ID),]
+
+
+# Clusterings
+clusterings = read_csv('./../Data/clusters.csv')
+
+
+# Update DE_info with SFARI and Neuronal information
+genes_info = DE_info %>% mutate('ID'=rownames(.)) %>% left_join(SFARI_genes, by='ID') %>% 
+  mutate(`gene-score`=ifelse(is.na(`gene-score`), 'None', `gene-score`)) %>%
+  left_join(GO_neuronal, by='ID') %>% left_join(clusterings, by='ID') %>%
+  mutate(Neuronal=ifelse(is.na(Neuronal), 0, Neuronal)) %>%
+  mutate(gene.score=ifelse(`gene-score`=='None' & Neuronal==1, 'Neuronal', `gene-score`), 
+         significant=padj<0.05 & !is.na(padj))
+
+# Add gene symbol
+getinfo = c('ensembl_gene_id','external_gene_id')
+mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl',
+               host='feb2014.archive.ensembl.org') ## Gencode v19
+gene_names = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=genes_info$ID, mart=mart)
+
+genes_info = genes_info %>% left_join(gene_names, by=c('ID'='ensembl_gene_id'))
+
+
+clustering_selected = 'DynamicHybrid'
+genes_info$Module = genes_info[,clustering_selected]
+
+dataset = read.csv(paste0('./../Data/dataset_', clustering_selected, '.csv'))
+dataset$Module = dataset[,clustering_selected]
+
+# Correct SFARI Scores
+dataset$gene.score = genes_info$gene.score
+
+# Enrichment Analysis
+load('./../Data/enrichmentAnalysis.RData')
+
+
+SFARI_colour_hue = function(r) {
+  pal = c('#FF7631','#FFB100','#E8E328','#8CC83F','#62CCA6','#59B9C9','#b3b3b3','#808080','gray','#d9d9d9')[r]
+}
+
+rm(DE_info, GO_annotations, clusterings, getinfo, mart, dds, GO_neuronal)
+```
+
+## Calculate the Enrichment of SFARI Genes in Modules
+
+<br>
+
+To measure the presence of SFARI Genes in a module, at first we were just measuring the percentage of genes in the module that belonge to SFARI, but this approach does not take into account the size of the module, and because of this it doesn't take into consideration the robustness of the results (it's easier to get a high percentage of SFARI genes in a small module by chance than in a larger module). Because of this, we chose to use the following approach:
+
+If we assume independence between SFARI Genes and modules, we can calculate the probability of obtaining a proportion of SFARI Genes at least as big as the one found in each module given its size
+
+<br>
+
+Notation:
+
+- N = Number of genes (16147)
+
+- S = Number of SFARI genes (789)
+
+- For each module:
+
+  - n = Number of genes in module
+  
+  - s = Number of SFARI Genes in module
+  
+<br>
+
+If we interpret the number of genes ($n$) in a module as $n$ random draws without replacement from a finite population of size $N$, and the number of SFARI genes in the module ($k$) as $k$ successes in those $n$ draws, where we know that $N$ contains exactly $K$ successes, then we can use the Hypergeometric Distribution to calculate the statistical significance of having drawn $k$ successes out of $n$ draws, and use this value to select the clusters with the highest enrichment
+
+<br><br>
+
+### Relation between SFARI Enrichment and Module-Diagnosis correlation
+<br>
+
+- **For Modules with negative correlation to ASD there doesn't seem to be a relation between this correlation and the enrichment of the SFARI Genes of the module, but for Modules with positive correlation, the higher the correlation, the smaller the enrichment of SFARI Genes**
+
+- SFARI genes seem to be strongly concentrated in a group of modules and almost abstent in others (many modules with a probability close to 1 and many with a probability close to 0, with not so many in between)
+
+- The size of the modules does play a part in the probabilities, with the smallest modules having on average less extreme probabilities than the rest of the modules
+
+```{r warning=FALSE, message=FALSE}
+SFARI_genes_by_module = dataset %>% mutate('hasSFARIscore' = !gene.score %in% c('None', 'Neuronal')) %>% 
+                        group_by(Module, MTcor, hasSFARIscore) %>% summarise(s=n()) %>% 
+                        left_join(dataset %>% group_by(Module) %>% summarise(n=n()), by='Module') %>% 
+                        mutate(perc=round(s/n*100,2)) %>% filter(hasSFARIscore & Module != 'gray') %>% arrange(desc(perc)) %>% ungroup
+
+N = sum(SFARI_genes_by_module$n)
+S = sum(SFARI_genes_by_module$s)
+
+calc_prob = function(row, log.p){
+  s = row[4] %>% as.numeric
+  n = row[5] %>% as.numeric
+  prob = phyper(s,S,N-S,n, log.p = log.p, lower.tail=FALSE)
+  return(prob)
+}
+
+SFARI_genes_by_module$prob = apply(SFARI_genes_by_module, 1, function(x) calc_prob(x, FALSE))
+SFARI_genes_by_module$adj_prob = p.adjust(SFARI_genes_by_module$prob, method = 'bonferroni')
+SFARI_genes_by_module = SFARI_genes_by_module %>% arrange(prob)
+
+ggplotly(SFARI_genes_by_module %>% ggplot(aes(MTcor, prob, size=n)) + geom_point(color=SFARI_genes_by_module$Module, alpha=0.5, aes(id=Module)) + 
+         geom_smooth(color='#cccccc', size = 0.5, se=FALSE) + xlab('Module-Diagnosis Correlation') + ylab('Probability') + 
+         ggtitle(paste0('Corr = ', round(cor(SFARI_genes_by_module$MTcor, SFARI_genes_by_module$prob),2), ': Corr[Module-ASD corr<0] = ', 
+                        round(cor(SFARI_genes_by_module$MTcor[SFARI_genes_by_module$MTcor<0], SFARI_genes_by_module$prob[SFARI_genes_by_module$MTcor<0]),3),
+                        ' Corr[Module-ASD corr>0] = ',
+                        round(cor(SFARI_genes_by_module$MTcor[SFARI_genes_by_module$MTcor>=0], SFARI_genes_by_module$prob[SFARI_genes_by_module$MTcor>=0]),2))) +
+         theme_minimal() + theme(legend.position = 'none'))
+
+```
+
+It's weird that the Module with the highest (positive) correlation to ASD have less enrichment in SFARI Genes than the rest of the Modules. This seems to be because even though SFARI Genes are quite balanced between over-and under-expressed gemes, they have lower lFC values than the rest of the genes in the over-expressed group
+
+```{r, warning=FALSE, message=FALSE}
+# !diagnostics off
+plot_data = genes_info %>% mutate(label = ifelse(!gene.score %in% c('Neuronal', 'None'), 'SFARI', gene.score)) %>% dplyr::select(label, log2FoldChange) %>%
+            mutate(class = factor(label, levels = c('None', 'Neuronal', 'SFARI')),
+                   quant = cut(log2FoldChange, breaks = quantile(log2FoldChange, probs = seq(0,1,0.05)) %>% as.vector, labels = FALSE)) %>% 
+            filter(label == 'SFARI') %>% group_by(quant) %>% tally %>% ungroup
+
+ggplotly(genes_info %>% mutate(direction = factor(ifelse(log2FoldChange<0, 'under-expressed', 'over-expressed'), levels = c('under-expressed', 'over-expressed')),
+                               label = factor(ifelse(!gene.score %in% c('Neuronal', 'None'), 'SFARI', gene.score), levels = c('None', 'Neuronal', 'SFARI'))) %>% 
+         ggplot(aes(x=direction, fill = label)) + geom_bar(position = 'fill') + ggtitle('Proportion of SFARI Genes for under- and over-expressed genes') +
+         scale_fill_manual(values = c('#b3b3b3','#808080','#ff6600')) + ylab('Proportion') + xlab('Direction') + scale_y_sqrt() + theme_minimal())
+
+ggplotly(plot_data %>% ggplot(aes(quant, n)) + geom_bar(stat = 'identity', fill = '#ff6600') + geom_smooth(color = 'gray', alpha = 0.3) + 
+         xlab('Log Fold Change Quantiles') + ylab('Number of SFARI Genes') + ggtitle('Number of SFARI Genes for lFC Quantiles') + theme_minimal())
+
+```
+
+<br><br>
+
+### Selecting Top Modules Enriched in SFARI Genes
+<br>
+
+We can interpet the probability we obtain as a p-value (and correct it for multiple testing), we can use it as a threshold to identify modules with a significantly high percentage of SFARI genes (adjusted p-value < 0.01)
+
+Using log-scale to help us differentiate between small differences close to zero better
+
+```{r warning=FALSE, message=FALSE}
+
+ggplotly(SFARI_genes_by_module %>% ggplot(aes(MTcor, adj_prob, size=n)) + geom_point(color=SFARI_genes_by_module$Module, alpha=0.5, aes(id=Module)) +
+         geom_hline(yintercept = 0.05, color = 'gray', linetype = 'dotted') + xlab('Module-Diagnosis Correlation') + ylab('Corrected p-values') + scale_y_log10() +
+         theme_minimal() + theme(legend.position = 'none'))
+
+top_modules = SFARI_genes_by_module$Module[SFARI_genes_by_module$adj_prob <0.05]
+
+cat(paste0('Keeping top ', length(top_modules),' modules: ', paste(top_modules, collapse = ', ')))
+
+rm(N,S)
+```
+
+## Exploratory Analysis of Top Modules
+
+<br>
+
+### PCA
+
+<br>
+
+The genes belonging to the modules enriched in SARI genes seem to be distributed in all of the PC space except for the highest values of PC2, which we know correspond to over-expressed genes. This agrees with the positive slope at the end of the trend line in the plot above
+
+```{r, warning=FALSE, message=FALSE, fig.width=10}
+pca = datExpr %>% prcomp
+
+plot_data = data.frame('ID'=rownames(datExpr), 'PC1' = pca$x[,1], 'PC2' = pca$x[,2]) %>%
+            left_join(dataset, by='ID') %>% left_join(genes_info %>% dplyr::select(ID, external_gene_id), by='ID') %>%
+            dplyr::select(ID, external_gene_id, PC1, PC2, Module, gene.score) %>%
+            mutate(ImportantModules = ifelse(Module %in% top_modules, as.character(Module), 'Others')) %>%
+            mutate(color = ifelse(ImportantModules=='Others','gray',ImportantModules),
+                   alpha = ifelse(ImportantModules=='Others', 0.1, 0.3),
+                   gene_id = paste0(ID, ' (', external_gene_id, ')'))
+
+table(plot_data$ImportantModules)
+
+p = plot_data %>% ggplot(aes(PC1, PC2, color=ImportantModules)) + geom_point(alpha=plot_data$alpha) + 
+    scale_colour_manual(values =  c(names(table(plot_data$ImportantModules))[-(length(top_modules)+1)],'gray')) + 
+    theme_minimal() + theme(legend.position = 'none') + ggtitle('Modules with the most significant presence of SFARI Genes')
+
+for(tm in top_modules){
+  p = p + geom_hline(yintercept = mean(plot_data$PC2[plot_data$Module==tm]), color = tm, linetype = 'dashed') + 
+          geom_vline(xintercept = mean(plot_data$PC1[plot_data$Module==tm]), color = tm, linetype = 'dashed')
+}
+
+ggExtra::ggMarginal(p, type='density', groupColour = TRUE, size=10)
+```
+
+<br>
+
+## Functional Enrichment Analysis
+
+```{r}
+
+i = 1
+kable(enrichment$enrichmentTable %>% filter(class==top_modules[i]) %>% 
+      dplyr::select(dataSetID, shortDataSetName, inGroups, Bonferroni, FDR, enrichmentRatio, effectiveClassSize, effectiveSetSize, nCommonGenes) %>%
+      arrange(Bonferroni, desc(enrichmentRatio)),
+      caption = paste0('Enriched terms for module ', top_modules[i], ' (SFARI Genes = ',
+                       round(SFARI_genes_by_module$perc[SFARI_genes_by_module$Module==top_modules[i]][1],4), '%)'))
+
+i = 2
+kable(enrichment$enrichmentTable %>% filter(class==top_modules[i]) %>% 
+      dplyr::select(dataSetID, shortDataSetName, inGroups, Bonferroni, FDR, enrichmentRatio, effectiveClassSize, effectiveSetSize, nCommonGenes) %>%
+      arrange(Bonferroni, desc(enrichmentRatio)),
+      caption = paste0('Enriched terms for module ', top_modules[i], ' (SFARI Genes = ',
+                       round(SFARI_genes_by_module$perc[SFARI_genes_by_module$Module==top_modules[i]][1],4), '%)'))
+
+i = 3
+kable(enrichment$enrichmentTable %>% filter(class==top_modules[i]) %>% 
+      dplyr::select(dataSetID, shortDataSetName, inGroups, Bonferroni, FDR, enrichmentRatio, effectiveClassSize, effectiveSetSize, nCommonGenes) %>%
+      arrange(Bonferroni, desc(enrichmentRatio)),
+      caption = paste0('Enriched terms for module ', top_modules[i], ' (SFARI Genes = ',
+                       round(SFARI_genes_by_module$perc[SFARI_genes_by_module$Module==top_modules[i]][1],4), '%)'))
+
+i = 4
+kable(enrichment$enrichmentTable %>% filter(class==top_modules[i]) %>% 
+      dplyr::select(dataSetID, shortDataSetName, inGroups, Bonferroni, FDR, enrichmentRatio, effectiveClassSize, effectiveSetSize, nCommonGenes) %>%
+      arrange(Bonferroni, desc(enrichmentRatio)),
+      caption = paste0('Enriched terms for module ', top_modules[i], ' (SFARI Genes = ',
+                       round(SFARI_genes_by_module$perc[SFARI_genes_by_module$Module==top_modules[i]][1],4), '%)'))
+
+i = 5
+kable(enrichment$enrichmentTable %>% filter(class==top_modules[i]) %>% 
+      dplyr::select(dataSetID, shortDataSetName, inGroups, Bonferroni, FDR, enrichmentRatio, effectiveClassSize, effectiveSetSize, nCommonGenes) %>%
+      arrange(Bonferroni, desc(enrichmentRatio)),
+      caption = paste0('Enriched terms for module ', top_modules[i], ' (SFARI Genes = ',
+                       round(SFARI_genes_by_module$perc[SFARI_genes_by_module$Module==top_modules[i]][1],4), '%)'))
+
+i = 6
+kable(enrichment$enrichmentTable %>% filter(class==top_modules[i]) %>% 
+      dplyr::select(dataSetID, shortDataSetName, inGroups, Bonferroni, FDR, enrichmentRatio, effectiveClassSize, effectiveSetSize, nCommonGenes) %>%
+      arrange(Bonferroni, desc(enrichmentRatio)),
+      caption = paste0('Enriched terms for module ', top_modules[i], ' (SFARI Genes = ',
+                       round(SFARI_genes_by_module$perc[SFARI_genes_by_module$Module==top_modules[i]][1],4), '%)'))
+
+```
+
+
+<br><br>
+
+### Comparison with original SFARI Genes
+
+```{r warning=FALSE, message=FALSE}
+SFARI_genes_old = read_csv('./../../../SFARI/Data/SFARI_genes_08-29-2019_w_ensembl_IDs.csv')
+SFARI_genes_old = SFARI_genes_old[!duplicated(SFARI_genes_old$ID) & !is.na(SFARI_genes_old$ID),]
+
+old_SFARI_genes_by_module = dataset %>% dplyr::select(ID, Module, MTcor) %>% left_join(SFARI_genes_old, by = 'ID') %>%
+                            mutate('hasSFARIscore' = !is.na(`gene-score`)) %>% 
+                            group_by(Module, MTcor, hasSFARIscore) %>% summarise(s=n()) %>% 
+                            left_join(dataset %>% group_by(Module) %>% summarise(n=n()), by='Module') %>% 
+                            mutate(perc=round(s/n*100,2)) %>% filter(hasSFARIscore & Module != 'gray') %>% arrange(desc(perc))
+
+N = sum(old_SFARI_genes_by_module$n)
+S = sum(old_SFARI_genes_by_module$s)
+
+old_SFARI_genes_by_module$prob = apply(old_SFARI_genes_by_module, 1, function(x) calc_prob(x, FALSE))
+old_SFARI_genes_by_module$adj_prob = p.adjust(old_SFARI_genes_by_module$prob, method = 'bonferroni')
+
+
+plot_data = SFARI_genes_by_module %>% ungroup %>% dplyr::rename('adj_prob_new' = adj_prob) %>% dplyr::select(Module, adj_prob_new) %>%
+            left_join(old_SFARI_genes_by_module %>% ungroup %>% dplyr::rename('adj_prob_old' = adj_prob) %>% dplyr::select(Module, adj_prob_old), by='Module')
+
+ggplotly(plot_data %>% ggplot(aes(adj_prob_old, adj_prob_new)) + geom_point(color = plot_data$Module, alpha = 0.5, aes(id=Module)) + 
+         geom_abline(a=0, b=1, color = 'gray', linetype = 'dotted') + theme_minimal() + scale_y_log10() + scale_x_log10() +
+         geom_hline(yintercept = 0.05, color = '#cccccc', linetype = 'dotted') + geom_vline(xintercept = 0.05, linetype = 'dotted', color = '#cccccc') +
+         xlab('Adjusted Probability with Old SFARI Scores') + ylab('Adjusted Probability with New SFARI Scores') + 
+         ggtitle('SFARI Significance by Module with original an new SFARI scores'))
+
+
+rm(N,S, calc_prob)
+```
+
+
+<br><br>
+
+#### Session info
+
+```{r print_session_info}
+sessionInfo()
+```
+<br><br>
