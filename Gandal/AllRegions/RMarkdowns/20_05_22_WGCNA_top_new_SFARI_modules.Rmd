@@ -47,19 +47,11 @@ clusterings = read_csv('./../Data/clusters.csv')
 
 # Update DE_info with SFARI and Neuronal information
 genes_info = DE_info %>% mutate('ID'=rownames(.)) %>% left_join(SFARI_genes, by='ID') %>% 
-  mutate(`gene-score`=ifelse(is.na(`gene-score`), 'None', `gene-score`)) %>%
+  mutate(`gene-score`=ifelse(is.na(`gene-score`), 'Others', `gene-score`)) %>%
   left_join(GO_neuronal, by='ID') %>% left_join(clusterings, by='ID') %>%
   mutate(Neuronal=ifelse(is.na(Neuronal), 0, Neuronal)) %>%
-  mutate(gene.score=ifelse(`gene-score`=='None' & Neuronal==1, 'Neuronal', `gene-score`), 
+  mutate(gene.score=ifelse(`gene-score`=='Others' & Neuronal==1, 'Neuronal', `gene-score`), 
          significant=padj<0.05 & !is.na(padj))
-
-# Add gene symbol
-getinfo = c('ensembl_gene_id','external_gene_id')
-mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl',
-               host='feb2014.archive.ensembl.org') ## Gencode v19
-gene_names = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=genes_info$ID, mart=mart)
-
-genes_info = genes_info %>% left_join(gene_names, by=c('ID'='ensembl_gene_id'))
 
 
 clustering_selected = 'DynamicHybrid'
@@ -120,7 +112,7 @@ If we interpret the number of genes ($n$) in a module as $n$ random draws withou
 - The size of the modules does play a part in the probabilities, with the smallest modules having on average less extreme probabilities than the rest of the modules
 
 ```{r warning=FALSE, message=FALSE}
-SFARI_genes_by_module = dataset %>% mutate('hasSFARIscore' = !gene.score %in% c('None', 'Neuronal')) %>% 
+SFARI_genes_by_module = dataset %>% mutate('hasSFARIscore' = !gene.score %in% c('Others', 'Neuronal')) %>% 
                         group_by(Module, MTcor, hasSFARIscore) %>% summarise(s=n()) %>% 
                         left_join(dataset %>% group_by(Module) %>% summarise(n=n()), by='Module') %>% 
                         mutate(perc=round(s/n*100,2)) %>% filter(hasSFARIscore & Module != 'gray') %>% arrange(desc(perc)) %>% ungroup
@@ -128,14 +120,14 @@ SFARI_genes_by_module = dataset %>% mutate('hasSFARIscore' = !gene.score %in% c(
 N = sum(SFARI_genes_by_module$n)
 S = sum(SFARI_genes_by_module$s)
 
-calc_prob = function(row, log.p){
+calc_prob = function(row, log.p, S){
   s = row[4] %>% as.numeric
   n = row[5] %>% as.numeric
-  prob = phyper(s,S,N-S,n, log.p = log.p, lower.tail=FALSE)
+  prob = phyper(s, S, N-S, n, log.p = log.p, lower.tail=FALSE)
   return(prob)
 }
 
-SFARI_genes_by_module$prob = apply(SFARI_genes_by_module, 1, function(x) calc_prob(x, FALSE))
+SFARI_genes_by_module$prob = apply(SFARI_genes_by_module, 1, function(x) calc_prob(x, FALSE, S))
 SFARI_genes_by_module$adj_prob = p.adjust(SFARI_genes_by_module$prob, method = 'bonferroni')
 SFARI_genes_by_module = SFARI_genes_by_module %>% arrange(prob)
 
@@ -149,22 +141,53 @@ ggplotly(SFARI_genes_by_module %>% ggplot(aes(MTcor, prob, size=n)) + geom_point
 
 ```
 
-It's weird that the Module with the highest (positive) correlation to ASD have less enrichment in SFARI Genes than the rest of the Modules. This seems to be because even though SFARI Genes are quite balanced between over-and under-expressed gemes, they have lower lFC values than the rest of the genes in the over-expressed group
+It's weird that the Modules with the highest (positive) correlation to ASD have less enrichment in SFARI Genes than the rest of the Modules. This seems to be because even though SFARI Genes are quite balanced between over-and under-expressed gemes, they have lower LFC values than the rest of the genes in the over-expressed group
 
 ```{r, warning=FALSE, message=FALSE}
 # !diagnostics off
-plot_data = genes_info %>% mutate(label = ifelse(!gene.score %in% c('Neuronal', 'None'), 'SFARI', gene.score)) %>% dplyr::select(label, log2FoldChange) %>%
-            mutate(class = factor(label, levels = c('None', 'Neuronal', 'SFARI')),
+plot_data = genes_info %>% mutate(label = ifelse(!gene.score %in% c('Neuronal', 'Others'), 'SFARI', gene.score)) %>% dplyr::select(label, log2FoldChange) %>%
+            mutate(class = factor(label, levels = c('Others', 'Neuronal', 'SFARI')),
                    quant = cut(log2FoldChange, breaks = quantile(log2FoldChange, probs = seq(0,1,0.05)) %>% as.vector, labels = FALSE)) %>% 
             filter(label == 'SFARI') %>% group_by(quant) %>% tally %>% ungroup
 
 ggplotly(genes_info %>% mutate(direction = factor(ifelse(log2FoldChange<0, 'under-expressed', 'over-expressed'), levels = c('under-expressed', 'over-expressed')),
-                               label = factor(ifelse(!gene.score %in% c('Neuronal', 'None'), 'SFARI', gene.score), levels = c('None', 'Neuronal', 'SFARI'))) %>% 
+                               label = factor(ifelse(!gene.score %in% c('Neuronal', 'Others'), 'SFARI', gene.score), levels = c('Others', 'Neuronal', 'SFARI'))) %>% 
          ggplot(aes(x=direction, fill = label)) + geom_bar(position = 'fill') + ggtitle('Proportion of SFARI Genes for under- and over-expressed genes') +
          scale_fill_manual(values = c('#b3b3b3','#808080','#ff6600')) + ylab('Proportion') + xlab('Direction') + scale_y_sqrt() + theme_minimal())
 
 ggplotly(plot_data %>% ggplot(aes(quant, n)) + geom_bar(stat = 'identity', fill = '#ff6600') + geom_smooth(color = 'gray', alpha = 0.3) + 
-         xlab('Log Fold Change Quantiles') + ylab('Number of SFARI Genes') + ggtitle('Number of SFARI Genes for lFC Quantiles') + theme_minimal())
+         xlab('Log Fold Change Quantiles') + ylab('Number of SFARI Genes') + ggtitle('Number of SFARI Genes for LFC Quantiles') + theme_minimal())
+
+```
+
+
+If we separate the SFARI Genes by score we find the same pattern for each score
+```{r, warning=FALSE, message=FALSE}
+
+calc_prob_by_SFARI_score = function(score){
+  
+  df = dataset %>% filter(gene.score == score) %>% group_by(Module, gene.score) %>% summarise(s = n()) %>%
+       filter(Module != 'gray') %>% ungroup %>% right_join(SFARI_genes_by_module %>% dplyr::select(Module, MTcor, n), by = 'Module') %>%
+       mutate(gene.score = '1', color = SFARI_colour_hue(as.numeric(score)), s = ifelse(is.na(s), 0, s)) %>% dplyr::select(Module, MTcor, gene.score, s, n, color)
+  
+  df$prob = apply(df, 1, function(x) calc_prob(x, FALSE, sum(dataset$gene.score == score)))
+  df$adj_prob = p.adjust(df$prob, method = 'bonferroni')
+  
+  return(df)
+}
+
+
+plot_data = c()
+
+for(score in names(table(dataset$gene.score[!dataset$gene.score %in% c('Neuronal','None', 'Others')]))){
+  score_info = calc_prob_by_SFARI_score(score)
+  plot_data = rbind(plot_data, score_info)
+}
+
+
+ggplotly(plot_data %>% ggplot(aes(MTcor, prob, size=n, color = color)) + geom_point(alpha=0.5, aes(id=Module)) + geom_smooth(size = 0.5, se=FALSE) +
+         xlab('Module-Diagnosis Correlation') + scale_colour_manual(values = SFARI_colour_hue(r=1:3)) + ylab('Probability') + 
+         ggtitle('Enrichment by SFARI Gene Score') + theme_minimal() + theme(legend.position = 'none'))
 
 ```
 
@@ -203,13 +226,9 @@ The genes belonging to the modules enriched in SARI genes seem to be distributed
 ```{r, warning=FALSE, message=FALSE, fig.width=10}
 pca = datExpr %>% prcomp
 
-plot_data = data.frame('ID'=rownames(datExpr), 'PC1' = pca$x[,1], 'PC2' = pca$x[,2]) %>%
-            left_join(dataset, by='ID') %>% left_join(genes_info %>% dplyr::select(ID, external_gene_id), by='ID') %>%
-            dplyr::select(ID, external_gene_id, PC1, PC2, Module, gene.score) %>%
-            mutate(ImportantModules = ifelse(Module %in% top_modules, as.character(Module), 'Others')) %>%
-            mutate(color = ifelse(ImportantModules=='Others','gray',ImportantModules),
-                   alpha = ifelse(ImportantModules=='Others', 0.1, 0.3),
-                   gene_id = paste0(ID, ' (', external_gene_id, ')'))
+plot_data = data.frame('ID'=rownames(datExpr), 'PC1' = pca$x[,1], 'PC2' = pca$x[,2]) %>% left_join(dataset, by='ID') %>% 
+            dplyr::select(ID, PC1, PC2, Module, gene.score) %>% mutate(ImportantModules = ifelse(Module %in% top_modules, as.character(Module), 'Others')) %>%
+            mutate(color = ifelse(ImportantModules=='Others','gray',ImportantModules), alpha = ifelse(ImportantModules=='Others', 0.1, 0.3))
 
 table(plot_data$ImportantModules)
 
@@ -293,7 +312,7 @@ old_SFARI_genes_by_module = dataset %>% dplyr::select(ID, Module, MTcor) %>% lef
 N = sum(old_SFARI_genes_by_module$n)
 S = sum(old_SFARI_genes_by_module$s)
 
-old_SFARI_genes_by_module$prob = apply(old_SFARI_genes_by_module, 1, function(x) calc_prob(x, FALSE))
+old_SFARI_genes_by_module$prob = apply(old_SFARI_genes_by_module, 1, function(x) calc_prob(x, FALSE, S))
 old_SFARI_genes_by_module$adj_prob = p.adjust(old_SFARI_genes_by_module$prob, method = 'bonferroni')
 
 

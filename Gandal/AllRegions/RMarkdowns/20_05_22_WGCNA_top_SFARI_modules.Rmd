@@ -53,14 +53,6 @@ genes_info = DE_info %>% mutate('ID'=rownames(.)) %>% left_join(SFARI_genes, by=
   mutate(gene.score=ifelse(`gene-score`=='None' & Neuronal==1, 'Neuronal', `gene-score`), 
          significant=padj<0.05 & !is.na(padj))
 
-# Add gene symbol
-getinfo = c('ensembl_gene_id','external_gene_id')
-mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl',
-               host='feb2014.archive.ensembl.org') ## Gencode v19
-gene_names = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=genes_info$ID, mart=mart)
-
-genes_info = genes_info %>% left_join(gene_names, by=c('ID'='ensembl_gene_id'))
-
 
 clustering_selected = 'DynamicHybrid'
 genes_info$Module = genes_info[,clustering_selected]
@@ -128,14 +120,14 @@ SFARI_genes_by_module = dataset %>% mutate('hasSFARIscore' = !gene.score %in% c(
 N = sum(SFARI_genes_by_module$n)
 S = sum(SFARI_genes_by_module$s)
 
-calc_prob = function(row, log.p){
+calc_prob = function(row, log.p, S){
   s = row[4] %>% as.numeric
   n = row[5] %>% as.numeric
-  prob = phyper(s,S,N-S,n, log.p = log.p, lower.tail=FALSE)
+  prob = phyper(s, S, N-S, n, log.p = log.p, lower.tail=FALSE)
   return(prob)
 }
 
-SFARI_genes_by_module$prob = apply(SFARI_genes_by_module, 1, function(x) calc_prob(x, FALSE))
+SFARI_genes_by_module$prob = apply(SFARI_genes_by_module, 1, function(x) calc_prob(x, FALSE, S))
 SFARI_genes_by_module$adj_prob = p.adjust(SFARI_genes_by_module$prob, method = 'bonferroni')
 SFARI_genes_by_module = SFARI_genes_by_module %>% arrange(prob)
 
@@ -165,6 +157,36 @@ ggplotly(genes_info %>% mutate(direction = factor(ifelse(log2FoldChange<0, 'unde
 
 ggplotly(plot_data %>% ggplot(aes(quant, n)) + geom_bar(stat = 'identity', fill = '#ff6600') + geom_smooth(color = 'gray', alpha = 0.3) + 
          xlab('Log Fold Change Quantiles') + ylab('Number of SFARI Genes') + ggtitle('Number of SFARI Genes for lFC Quantiles') + theme_minimal())
+
+```
+
+If we separate the SFARI Genes by score we find the same pattern for each score, although much noisier
+```{r, warning=FALSE, message=FALSE}
+
+calc_prob_by_SFARI_score = function(score){
+  
+  df = dataset %>% filter(gene.score == score) %>% group_by(Module, gene.score) %>% summarise(s = n()) %>%
+       filter(Module != 'gray') %>% ungroup %>% right_join(SFARI_genes_by_module %>% dplyr::select(Module, MTcor, n), by = 'Module') %>%
+       mutate(gene.score = '1', color = SFARI_colour_hue(as.numeric(score)), s = ifelse(is.na(s), 0, s)) %>% dplyr::select(Module, MTcor, gene.score, s, n, color)
+  
+  df$prob = apply(df, 1, function(x) calc_prob(x, FALSE, sum(dataset$gene.score == score)))
+  df$adj_prob = p.adjust(df$prob, method = 'bonferroni')
+  
+  return(df)
+}
+
+
+plot_data = c()
+
+for(score in names(table(dataset$gene.score[!dataset$gene.score %in% c('Neuronal','None', 'Others')]))){
+  score_info = calc_prob_by_SFARI_score(score)
+  plot_data = rbind(plot_data, score_info)
+}
+
+
+ggplotly(plot_data %>% ggplot(aes(MTcor, prob, size=n, color = color)) + geom_point(alpha=0.5, aes(id=Module)) + geom_smooth(size = 0.5, se=FALSE) +
+         xlab('Module-Diagnosis Correlation') + scale_colour_manual(values = SFARI_colour_hue(r=1:6)) + ylab('Probability') + 
+         ggtitle('Enrichment by SFARI Gene Score') + theme_minimal() + theme(legend.position = 'none'))
 
 ```
 
@@ -203,13 +225,9 @@ The genes belonging to the modules enriched in SARI genes seem to be distributed
 ```{r, warning=FALSE, message=FALSE, fig.width=10}
 pca = datExpr %>% prcomp
 
-plot_data = data.frame('ID'=rownames(datExpr), 'PC1' = pca$x[,1], 'PC2' = pca$x[,2]) %>%
-            left_join(dataset, by='ID') %>% left_join(genes_info %>% dplyr::select(ID, external_gene_id), by='ID') %>%
-            dplyr::select(ID, external_gene_id, PC1, PC2, Module, gene.score) %>%
-            mutate(ImportantModules = ifelse(Module %in% top_modules, as.character(Module), 'Others')) %>%
-            mutate(color = ifelse(ImportantModules=='Others','gray',ImportantModules),
-                   alpha = ifelse(ImportantModules=='Others', 0.1, 0.3),
-                   gene_id = paste0(ID, ' (', external_gene_id, ')'))
+plot_data = data.frame('ID'=rownames(datExpr), 'PC1' = pca$x[,1], 'PC2' = pca$x[,2]) %>% left_join(dataset, by='ID') %>% 
+            dplyr::select(ID, PC1, PC2, Module, gene.score) %>% mutate(ImportantModules = ifelse(Module %in% top_modules, as.character(Module), 'Others')) %>%
+            mutate(color = ifelse(ImportantModules=='Others','gray',ImportantModules), alpha = ifelse(ImportantModules=='Others', 0.1, 0.3))
 
 table(plot_data$ImportantModules)
 
