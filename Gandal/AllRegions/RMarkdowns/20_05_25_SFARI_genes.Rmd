@@ -371,7 +371,33 @@ ggplotly(DE_info %>% ggplot(aes(x=gene.score, y=abs(log2FoldChange), fill=gene.s
 ```
 <br>
 
-### Effects of modifying filtering threshold by SFARI score
+### Differentially Expressed genes
+
+<br>
+
+Except for SFARI Score 3, the higher the SFARI score, the lower the proportion of DE Genes in the group
+
+```{r}
+plot_info = DE_info %>% group_by(gene.score, significant) %>% tally(name = 'DE') %>% ungroup %>% ungroup %>%
+            left_join(DE_info %>% group_by(gene.score) %>% tally(name = 'total') %>% ungroup, by = 'gene.score') %>% filter(significant) %>% 
+            mutate('prop' = DE/total)
+
+ggplotly(plot_info %>% ggplot(aes(gene.score, prop, fill = gene.score)) + geom_bar(stat='identity') + xlab('SFARI Gene Score') + ylab('% of DE genes') +
+              scale_fill_manual(values=SFARI_colour_hue(r=c(1:6,8,7))) + theme_minimal())
+```
+
+```{r}
+
+
+
+```
+
+
+<br>
+
+### Effects of modifying LFC threshold by SFARI score
+
+<br>
 
 **The higher the SFARI score, the higher the percentage of genes that get filtered by differential expression.**
 

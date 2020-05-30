@@ -1,0 +1,549 @@
+---
+title: 'Top Modules Exploratory Analysis'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+```{r load_packages, warning=FALSE, message=FALSE}
+#setwd('/afs/inf.ed.ac.uk/user/s17/s1725186/Documents/PhD-Models/FirstPUModel/RMarkdowns')
+
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(dendextend)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally)
+library(expss)
+library(polycor)
+library(foreach) ; library(doParallel)
+library(knitr)
+library(biomaRt)
+library(anRichment) ; library(BrainDiseaseCollection)
+suppressWarnings(suppressMessages(library(WGCNA)))
+
+SFARI_colour_hue = function(r) {
+  pal = c('#FF7631','#FFB100','#E8E328','#8CC83F','#62CCA6','#59B9C9','#b3b3b3','#808080','gray','#d9d9d9')[r]
+}
+```
+
+Load preprocessed dataset (preprocessing code in 19_10_14_data_preprocessing.Rmd) and clustering (pipeline in 19_10_21_WGCNA.Rmd)
+```{r load_dataset, message=FALSE, warning=FALSE}
+
+# Gandal dataset
+load('./../Data/preprocessed_data_imputed.RData')
+datExpr = datExpr %>% data.frame
+DE_info = DE_info %>% data.frame
+
+
+# GO Neuronal annotations: regex 'neuron' in GO functional annotations and label the genes that make a match as neuronal
+GO_annotations = read.csv('./../Data/genes_GO_annotations.csv')
+GO_neuronal = GO_annotations %>% filter(grepl('neuron', go_term)) %>% 
+              mutate('ID'=as.character(ensembl_gene_id)) %>% 
+              dplyr::select(-ensembl_gene_id) %>% distinct(ID) %>%
+              mutate('Neuronal'=1)
+
+
+# SFARI Genes
+SFARI_genes = read_csv('./../../../SFARI/Data/SFARI_genes_08-29-2019_w_ensembl_IDs.csv')
+SFARI_genes = SFARI_genes[!duplicated(SFARI_genes$ID) & !is.na(SFARI_genes$ID),]
+
+
+# Clusterings
+clusterings = read_csv('./../Data/clusters_imputed.csv')
+
+
+# Update DE_info with SFARI and Neuronal information
+genes_info = DE_info %>% mutate('ID'=rownames(.)) %>% left_join(SFARI_genes, by='ID') %>% 
+  mutate(`gene-score`=ifelse(is.na(`gene-score`), 'None', `gene-score`)) %>%
+  left_join(GO_neuronal, by='ID') %>% left_join(clusterings, by='ID') %>%
+  mutate(Neuronal=ifelse(is.na(Neuronal), 0, Neuronal)) %>%
+  mutate(gene.score=ifelse(`gene-score`=='None' & Neuronal==1, 'Neuronal', `gene-score`), 
+         significant=padj<0.05 & !is.na(padj))
+
+# Add gene symbol
+getinfo = c('ensembl_gene_id','external_gene_id')
+mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl',
+               host='feb2014.archive.ensembl.org') ## Gencode v19
+gene_names = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=genes_info$ID, mart=mart)
+
+genes_info = genes_info %>% left_join(gene_names, by=c('ID'='ensembl_gene_id'))
+
+
+clustering_selected = 'DynamicHybrid'
+genes_info$Module = genes_info[,clustering_selected]
+
+dataset = read.csv(paste0('./../Data/dataset_', clustering_selected, '_imputed.csv'))
+dataset$Module = dataset[,clustering_selected]
+
+
+rm(DE_info, GO_annotations, clusterings, getinfo, mart, dds)
+```
+
+<br>
+
+## Relation to external clinical traits
+
+<br>
+
+### Quantifying module-trait associations
+
+<br>
+
+Using the `hetcor` function, that calculates Pearson, polyserial or polychoric correlations depending on the type of variables involved.
+
+```{r calc_module_trait_associations, message=FALSE, warning=FALSE}
+datTraits = datMeta %>% dplyr::select(Diagnosis, Region, Sex, Age, PMI, RNAExtractionBatch) %>%
+            dplyr::rename('ExtractionBatch' = RNAExtractionBatch)
+
+# Recalculate MEs with color labels
+ME_object = datExpr %>% t %>% moduleEigengenes(colors = genes_info$Module)
+MEs = orderMEs(ME_object$eigengenes)
+
+# Calculate correlation between eigengenes and the traits and their p-values
+moduleTraitCor = MEs %>% apply(2, function(x) hetcor(x, datTraits)$correlations[1,-1]) %>% t
+rownames(moduleTraitCor) = colnames(MEs)
+colnames(moduleTraitCor) = colnames(datTraits)
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nrow(datExpr))
+
+# Create text matrix for the Heatmap
+textMatrix = paste0(signif(moduleTraitCor, 2), ' (', signif(moduleTraitPvalue, 1), ')')
+dim(textMatrix) = dim(moduleTraitCor)
+
+# In case there are any NAs
+if(sum(!complete.cases(moduleTraitCor))>0){
+  print(paste0(sum(is.na(moduleTraitCor)),' correlation(s) could not be calculated')) 
+}
+
+rm(ME_object)
+```
+
+**Note:**  The correlations between Modules and Diagonsis that cannot be calculated, weirdly enough, is because the initial correlation is too high, so it would be a very bad thing to lose these modules because of this numerical error. I’m going to fill in the values using the polyserial function, which doesn’t give exactly the same results as the hetcor() function, but it’s quite similar.
+
+```{r, warning=FALSE, message=FALSE}
+# Calculate the correlation tha failed with hetcor()
+missing_modules = rownames(moduleTraitCor)[is.na(moduleTraitCor[,1])]
+
+for(m in missing_modules){
+  cat(paste0('Correcting Module-Diagnosis correlation for Module ', gsub('ME','',m)))
+  moduleTraitCor[m,'Diagnosis'] = polyserial(MEs[,m], datTraits$Diagnosis)
+}
+
+rm(missing_modules)
+```
+
+I'm going to select all the modules that have an absolute correlation higher than 0.9 with Diagnosis to study them
+
+```{r plot_heatmap, fig.width=10, fig.height=10, warning=FALSE, message=FALSE}
+
+# Sort moduleTraitCor by Diagnosis
+moduleTraitCor = moduleTraitCor[order(moduleTraitCor[,1], decreasing=TRUE),]
+moduleTraitPvalue = moduleTraitPvalue[order(moduleTraitCor[,1], decreasing=TRUE),]
+
+# Create text matrix for the Heatmap
+textMatrix = paste0(signif(moduleTraitCor, 2), ' (', signif(moduleTraitPvalue, 1), ')')
+dim(textMatrix) = dim(moduleTraitCor)
+
+
+labeledHeatmap(Matrix = moduleTraitCor, xLabels = names(datTraits), yLabels =  gsub('ME','',rownames(moduleTraitCor)), 
+               yColorWidth=0, colors = brewer.pal(11,'PiYG'), bg.lab.y = gsub('ME','',rownames(moduleTraitCor)),
+               textMatrix = textMatrix, setStdMargins = FALSE, cex.text = 0.8, cex.lab.y = 0.75, zlim = c(-1,1),
+               main = paste('Module-Trait relationships'))
+
+diagnosis_cor = data.frame('Module' = gsub('ME','',rownames(moduleTraitCor)),
+                           'MTcor' = moduleTraitCor[,'Diagnosis'],
+                           'MTpval' = moduleTraitPvalue[,'Diagnosis'])
+
+genes_info = genes_info %>% left_join(diagnosis_cor, by='Module')
+
+rm(moduleTraitPvalue, datTraits, textMatrix, diagnosis_cor)
+```
+<br>
+
+## Studying the modules with the highest absolute correlation to Diagnosis
+
+<br>
+
+The modules consist mainly of points with very high (absolute) values in PC2 (which we know is related to lfc), so this result is consistent with the high correlation between Module and Diagnosis, although some of the points with the highest PC2 values do not belong to these top modules
+
+```{r warning=FALSE}
+top_modules = gsub('ME','',rownames(moduleTraitCor)[abs(moduleTraitCor[,'Diagnosis'])>0.9])
+
+cat(paste0('Top modules selected: ', paste(top_modules, collapse=', '),'\n'))
+
+pca = datExpr %>% prcomp
+
+plot_data = data.frame('ID'=rownames(datExpr), 'PC1' = pca$x[,1], 'PC2' = pca$x[,2]) %>%
+            left_join(dataset, by='ID') %>% left_join(genes_info %>% dplyr::select(ID, external_gene_id), by='ID') %>%
+            dplyr::select(ID, external_gene_id, PC1, PC2, Module, gene.score) %>%
+            mutate(ImportantModules = ifelse(Module %in% top_modules, as.character(Module), 'Others')) %>%
+            mutate(color = ifelse(ImportantModules=='Others','gray',ImportantModules),
+                   alpha = ifelse(ImportantModules=='Others', 0.2, 0.4),
+                   gene_id = paste0(ID, ' (', external_gene_id, ')'))
+
+table(plot_data$ImportantModules)
+
+ggplotly(plot_data %>% ggplot(aes(PC1, PC2, color=ImportantModules)) + 
+         geom_point(alpha=plot_data$alpha, color=plot_data$color, aes(ID=gene_id)) + theme_minimal() + 
+           ggtitle('Modules with strongest relation to Diagnosis'))
+
+rm(pca)
+```
+
+<br>
+
+---
+
+<br>
+
+### Module Membership vs Gene Significance
+
+<br>
+
+```{r, warning=FALSE}
+
+create_plot = function(module){
+  
+  plot_data = dataset %>% dplyr::select(ID, paste0('MM.',gsub('#','',module)), GS, gene.score) %>% filter(dataset$Module==module)
+  colnames(plot_data)[2] = 'Module'
+  
+  SFARI_colors = as.numeric(names(table(as.character(plot_data$gene.score)[plot_data$gene.score!='None'])))
+  
+  p = ggplotly(plot_data %>% ggplot(aes(Module, GS, color=gene.score)) + geom_point(alpha=0.5, aes(ID=ID)) + ylab('Gene Significance') +
+               scale_color_manual(values=SFARI_colour_hue(r=c(SFARI_colors,8))) + theme_minimal() + xlab('Module Membership') +
+               ggtitle(paste0('Module ', module,'  (MTcor = ', round(moduleTraitCor[paste0('ME',module),1],2),')')))
+  
+  return(p)
+}
+
+create_plot(top_modules[1])
+create_plot(top_modules[2])
+
+rm(create_plot)
+```
+
+<br>
+
+---
+
+<br>
+
+### SFARI Genes
+
+<br>
+
+List of top SFARI Genes in top modules ordered by SFARI score and Gene Significance
+```{r, warning=FALSE}
+
+table_data = dataset %>% left_join(genes_info %>% dplyr::select(ID, external_gene_id), by='ID') %>%
+             dplyr::select(ID, external_gene_id, GS, gene.score, Module) %>% arrange(gene.score, desc(abs(GS))) %>%
+             dplyr::rename('Ensembl ID'=ID, 'Gene Symbol'=external_gene_id, 
+                    'SFARI score'=gene.score, 'Gene Significance'=GS)
+
+kable(table_data %>% filter(Module == top_modules[1] & `SFARI score` %in% c(1,2,3)) %>% dplyr::select(-Module),
+      caption=paste0('Top SFARI Genes for Module ', top_modules[1]))
+
+kable(table_data %>% filter(Module == top_modules[2] & `SFARI score` %in% c(1,2,3)) %>% dplyr::select(-Module),
+      caption=paste0('Top SFARI Genes for Module ', top_modules[2]))
+
+```
+
+Modules with the strongest module-diagnosis correlation should have the highest percentage of SFARI Genes, but this doesn't seem to be the case (even the opposite may be true)
+
+```{r, warning=FALSE, message=FALSE}
+plot_data = dataset %>% mutate('hasSFARIscore' = gene.score!='None') %>% 
+            group_by(Module, MTcor, hasSFARIscore) %>% summarise(p=n()) %>% 
+            left_join(dataset %>% group_by(Module) %>% summarise(n=n()), by='Module') %>% 
+            mutate(p=round(p/n*100,2)) 
+
+for(i in 1:nrow(plot_data)){
+  this_row = plot_data[i,]
+  if(this_row$hasSFARIscore==FALSE & this_row$p==100){
+    new_row = this_row
+    new_row$hasSFARIscore = TRUE
+    new_row$p = 0
+    plot_data = plot_data %>% rbind(new_row)
+  }
+}
+
+plot_data = plot_data %>% filter(hasSFARIscore==TRUE)
+
+ggplotly(plot_data %>% ggplot(aes(MTcor, p, size=n)) + geom_smooth(color='gray', se=FALSE) +
+         geom_point(color=plot_data$Module, alpha=0.5, aes(id=Module)) + geom_hline(yintercept=mean(plot_data$p), color='gray') +
+         xlab('Module-Diagnosis correlation') + ylab('% of SFARI genes') +
+         theme_minimal() + theme(legend.position = 'none'))
+
+rm(i, this_row, new_row, plot_data)
+```
+
+Breaking the SFARI genes by score
+
+Perhaps there aren't enough genes in each score for these plots to be reliable
+
+```{r, warning=FALSE, message=FALSE, fig.width=10}
+scores = c(1,2,3,4,5,6,'None')
+
+plot_data = dataset %>% group_by(Module, MTcor, gene.score) %>% summarise(n=n()) %>% 
+            left_join(dataset %>% group_by(Module) %>% summarise(N=n()), by='Module') %>% 
+            mutate(p=round(n/N*100,2), gene.score = as.character(gene.score))
+
+for(i in 1:nrow(plot_data)){
+  this_row = plot_data[i,]
+  if(sum(plot_data$Module == this_row$Module)<7){
+    missing_scores = which(! scores %in% plot_data$gene.score[plot_data$Module == this_row$Module])
+    for(s in missing_scores){
+      new_row = this_row
+      new_row$gene.score = as.character(s)
+      new_row$n = 0
+      new_row$p = 0
+      plot_data = plot_data %>% rbind(new_row) 
+    }
+  }
+}
+
+plot_data = plot_data %>% filter(gene.score != 'None')
+
+plot_function = function(i){
+  i = 2*i-1
+  plot_list = list()
+  for(j in 1:2){
+    plot_list[[j]] = ggplotly(plot_data %>% filter(gene.score==scores[i+j-1]) %>% ggplot(aes(MTcor, p, size=n)) + 
+                geom_smooth(color='gray', se=FALSE) +
+                geom_point(color=plot_data$Module[plot_data$gene.score==scores[i+j-1]], alpha=0.5, aes(id=Module)) +
+                geom_hline(yintercept=mean(plot_data$p[plot_data$gene.score==scores[i+j-1]]), color='gray') +
+                xlab('Module-Diagnosis correlation') + ylab('% of SFARI genes') +
+                theme_minimal() + theme(legend.position = 'none'))
+  }
+  p = subplot(plot_list, nrows=1) %>% layout(annotations = list(
+    list(x = 0.2 , y = 1.05, text = paste0('SFARI score ', scores[i]), showarrow = F, xref='paper', yref='paper'),
+    list(x = 0.8 , y = 1.05, text = paste0('SFARI score ', scores[i+1]), showarrow = F, xref='paper', yref='paper')))
+  
+  return(p)
+}
+
+plot_function(1)
+plot_function(2)
+plot_function(3)
+
+rm(i, s, this_row, new_row, plot_function)
+```
+
+<br>
+
+---
+
+<br>
+
+### Module Eigengenes
+
+<br>
+
+Since these modules have the strongest relation to autism, this pattern should be reflected in their model eigengenes, having two different behaviours for the samples corresponding to autism and the ones corresponding to control.
+
+In both cases, the Eigengenes separate the behaviour between autism and control samples very clearly!
+```{r, fig.width=10, fig.height=5}
+
+plot_EGs = function(module){
+
+  plot_data = data.frame('ID' = rownames(MEs), 'MEs' = MEs[,paste0('ME',module)], 'Diagnosis' = datMeta$Diagnosis)
+
+  p = plot_data %>% ggplot(aes(Diagnosis, MEs, fill=Diagnosis)) + geom_boxplot() + theme_minimal() + theme(legend.position='none') +
+                    ggtitle(paste0('Module ', module, '  (MTcor=',round(moduleTraitCor[paste0('ME',module),1],2),')'))
+  return(p)
+}
+
+p1 = plot_EGs(top_modules[1])
+p2 = plot_EGs(top_modules[2])
+
+grid.arrange(p1, p2, nrow=1)
+
+rm(plot_EGs, p1, p2)
+```
+
+<br>
+
+---
+
+<br>
+
+### Identifying important genes
+
+<br>
+
+Selecting the modules with the highest correlation to Diagnosis, and, from them, the genes with the highest module membership-(absolute) gene significance
+
+*Ordered by $\frac{MM+|GS|}{2}$
+
+There aren't that many SFARI genes in the top genes of the modules and not a single one belonging to scores 1 and 2
+```{r select_important_genes, warning=FALSE, message=FALSE}
+
+create_table = function(module){
+  top_genes = dataset %>% left_join(genes_info %>% dplyr::select(ID, external_gene_id), by='ID') %>% 
+              dplyr::select(ID, external_gene_id, paste0('MM.',gsub('#','',module)), GS, gene.score) %>%
+              filter(dataset$Module==module) %>% dplyr::rename('MM' = paste0('MM.',gsub('#','',module))) %>% 
+              mutate(importance = (MM+abs(GS))/2) %>% arrange(by=-importance) %>% top_n(20)
+  return(top_genes)
+}
+
+top_genes = list()
+for(i in 1:length(top_modules)) top_genes[[i]] = create_table(top_modules[i])
+
+kable(top_genes[[1]], caption=paste0('Top 10 genes for module ', top_modules[1], '  (MTcor = ',
+                                  round(moduleTraitCor[paste0('ME',top_modules[1]),1],2),')'))
+
+kable(top_genes[[2]], caption=paste0('Top 10 genes for module ', top_modules[2], '  (MTcor = ',
+                                  round(moduleTraitCor[paste0('ME',top_modules[2]),1],2),')'))
+
+rm(create_table)
+```
+
+```{r}
+pca = datExpr %>% prcomp
+
+ids = c()
+for(tg in top_genes) ids = c(ids, tg$ID)
+
+plot_data = data.frame('ID'=rownames(datExpr), 'PC1' = pca$x[,1], 'PC2' = pca$x[,2]) %>%
+            left_join(dataset, by='ID') %>% dplyr::select(ID, PC1, PC2, Module, gene.score) %>%
+            mutate(color = ifelse(Module %in% top_modules, as.character(Module), 'gray')) %>%
+            mutate(alpha = ifelse(color %in% top_modules & 
+                                  ID %in% ids, 1, 0.1))
+
+plot_data %>% ggplot(aes(PC1, PC2)) + geom_point(alpha=plot_data$alpha, color=plot_data$color) + 
+              theme_minimal() + ggtitle('Important genes identified through WGCNA')
+```
+
+Level of expression by Diagnosis for top genes, ordered by importance (defined above)
+```{r, warning=FALSE, fig.width=10}
+create_plot = function(i){
+  
+  plot_data = datExpr[rownames(datExpr) %in% top_genes[[i]]$ID,] %>% mutate('ID' = rownames(.)) %>% 
+              melt(id.vars='ID') %>% mutate(variable = gsub('X','',variable)) %>%
+              left_join(top_genes[[i]], by='ID') %>%
+              left_join(datMeta %>% dplyr::select(Dissected_Sample_ID, Diagnosis),
+                        by = c('variable'='Dissected_Sample_ID')) %>% arrange(desc(importance))
+  
+  p = ggplotly(plot_data %>% mutate(external_gene_id=factor(external_gene_id, 
+                                    levels=unique(plot_data$external_gene_id), ordered=T)) %>%
+               ggplot(aes(external_gene_id, value, fill=Diagnosis)) + geom_boxplot() + theme_minimal() +
+                      xlab(paste0('Top genes for module ', top_modules[i], ' (MTcor = ',
+                       round(genes_info$MTcor[genes_info$Module==top_modules[i]][1],2), ')')) + ylab('Level of Expression') +
+                      theme(axis.text.x = element_text(angle = 90, hjust = 1)))
+  return(p)
+  
+}
+
+create_plot(1)
+create_plot(2)
+
+rm(create_plot)
+```
+
+<br>
+
+---
+
+<br>
+
+## Enrichment Analysis
+
+<br>
+
+Using the package [anRichment](https://peterlangfelder.com/2018/11/25/functional-enrichment-analysis-via-r-package-anrichment/)
+
+- It was designed by Peter Langfelder explicitly to perform enrichmen analysis on WGCNA's modules in brain-related experiments (mainly Huntington's Disease)
+
+- It has packages with brain annotations:
+
+  - [BrainDiseaseCollection:](https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/GeneAnnotation/BrainDiseaseCollection/) A Brain Disease Gene Set Collection for anRichment
+  
+  - MillerAIBSCollection: (included in anRichment) Contains gene sets collected by Jeremy A. Miller at AIBS of various cell type and brain region marker sets, gene sets collected from expression studies of developing brain, as well as a collection of transcription factor (TF) targets from the original ChEA study
+
+- The tutorial says it's an experimental package
+
+- It's not on CRAN nor in Bioconductor
+
+```{r, warning=FALSE}
+# Prepare dataset
+
+# Create dataset with top modules membership and removing the genes without an assigned module
+EA_dataset = data.frame('ensembl_gene_id' = genes_info$ID,
+                        module = ifelse(genes_info$Module %in% top_modules, genes_info$Module, 'other')) %>%
+             filter(genes_info$Module!='gray')
+
+# Assign Entrez Gene Id to each gene
+getinfo = c('ensembl_gene_id','entrezgene')
+mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl', host='feb2014.archive.ensembl.org')
+biomart_output = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=EA_dataset$ensembl_gene_id, mart=mart)
+
+EA_dataset = EA_dataset %>% left_join(biomart_output, by='ensembl_gene_id')
+
+for(tm in top_modules){
+  cat(paste0('\n',sum(EA_dataset$module==tm & is.na(EA_dataset$entrezgene)), ' genes from top module ',
+             tm, ' don\'t have an Entrez Gene ID')) 
+}
+
+rm(getinfo, mart, biomart_output, tm)
+```
+
+```{r enrichment_analysis, warning=FALSE}
+
+# Manual: https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/GeneAnnotation/Tutorials/anRichment-Tutorial1.pdf
+
+collectGarbage()
+
+# EA_dataset = rbind(EA_dataset[EA_dataset$module!='other',], EA_dataset[EA_dataset$module=='other',][sample(sum(EA_dataset$module=='other'), 1000),])
+
+# Prepare datasets
+GO_col = buildGOcollection(organism = 'human', verbose = 0)
+internal_col = internalCollection(organism = 'human')
+MillerAIBS_col = MillerAIBSCollection(organism = 'human')
+BrainDisease_col = BrainDiseaseCollection(organism = 'human')
+combined_col = mergeCollections(GO_col, internal_col, MillerAIBS_col, BrainDisease_col)
+
+# Print collections used
+cat('Using collections: ')
+knownGroups(combined_col, sortBy = 'size')
+
+# Perform Enrichment Analysis
+enrichment = enrichmentAnalysis(classLabels = EA_dataset$module, identifiers = EA_dataset$entrezgene,
+                                refCollection = combined_col, #useBackground = 'given', 
+                                threshold = 1e-4, thresholdType = 'Bonferroni',
+                                getOverlapEntrez = FALSE, getOverlapSymbols = TRUE)
+
+```
+
+<br>
+
+### Results
+
+<br>
+
+```{r}
+
+kable(enrichment$enrichmentTable %>% filter(class==top_modules[1]) %>% 
+      dplyr::select(dataSetID, shortDataSetName, inGroups, Bonferroni, FDR, enrichmentRatio,
+                    effectiveClassSize, effectiveSetSize, nCommonGenes) %>%
+      arrange(Bonferroni, desc(enrichmentRatio)),
+      caption = paste0('Enriched terms for module ', top_modules[1], ' (MTcor = ',
+                       round(genes_info$MTcor[genes_info$Module==top_modules[1]][1],4), ')'))
+
+
+kable(enrichment$enrichmentTable %>% filter(class==top_modules[2]) %>% 
+      dplyr::select(dataSetID, shortDataSetName, inGroups, Bonferroni, FDR, enrichmentRatio,
+                    effectiveClassSize, effectiveSetSize, nCommonGenes) %>%
+      arrange(Bonferroni, enrichmentRatio),
+      caption = paste0('Enriched terms for module ', top_modules[2], ' (MTcor = ',
+                       round(genes_info$MTcor[genes_info$Module==top_modules[2]][1],4), ')'))
+```
+
+Save Enrichment Analysis results
+```{r}
+save(enrichment, file='./../Data/enrichmentAnalysis_imputed.RData')
+#load('./../Data/enrichmentAnalysis.RData')
+```
+
+<br><br>
+
+#### Session info
+
+```{r print_session_info}
+sessionInfo()
+```
+<br><br>

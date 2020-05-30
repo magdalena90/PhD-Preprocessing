@@ -1,0 +1,717 @@
+---
+title: 'Z-score metrics for outlier detection comparison'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+<br><br>
+
+When removing the gene ARHGAP11B (ENSG00000187951) there was an important change in the WGCNA modules, and when analysing what could have caused this, we found that this gene had a very big outlier value for a single sample, which we think altered the values of the other genes during the vst transformation enough to alter the modules by the WGNCA algorithm (See 20_02_28_comparison.html for more details about this).
+
+Since the preprocessing pipeline did not catch this behaviour and it ended up causing problems in downstream analysis, we want to see how often we can find these type of behaviours in the data and if/how much they alter the results of WGCNA modules.
+
+```{r load_packages, warning=FALSE, message=FALSE}
+
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(plotlyutils)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally) ; library(ggExtra) ; library(ggpubr)
+library(WGCNA)
+library(expss)
+library(knitr)
+library(polycor)
+```
+
+```{r, warning=FALSE, message=FALSE}
+
+# Load preprocessed data to get DE information and the genes that weren't filtered during preprocessing
+load('./../../AllRegions/Data/filtered_raw_data_old.RData')
+datExpr_filtered = datExpr
+datGenes_filtered = datGenes
+
+load('./../../AllRegions/Data/preprocessed_data.RData')
+DE_info = DE_info %>% data.frame %>% mutate('ID' = rownames(datExpr), 'DE' = padj<0.05) %>%
+          dplyr::select(ID, log2FoldChange, padj, DE)
+
+
+# Load original expression datasets
+datExpr = read.csv('./../Data/RNAseq_ASD_datExpr.csv', row.names=1)
+datMeta = read.csv('./../Data/RNAseq_ASD_datMeta.csv')
+
+
+datMeta = datMeta %>% mutate(Brain_Region = as.factor(Region)) %>% 
+                      mutate(Brain_lobe = case_when(Brain_Region == 'BA4_6' ~ 'Frontal',
+                                                    Brain_Region == 'BA7'   ~ 'Parietal',
+                                                    Brain_Region == 'BA38'  ~ 'Temporal',
+                                                    TRUE ~ 'Occipital')) %>%
+                      mutate(Batch = as.factor(gsub('/', '.', RNAExtractionBatch)), 
+                             Diagnosis = factor(Diagnosis_, levels=c('CTL','ASD'))) %>% 
+                      dplyr::select(-Diagnosis_)
+
+# Filtering genes: These filters would be the same, so I'll just keep the genes present in the 
+# filtered dataset instead of repeating the whole filtering
+datExpr = datExpr[rownames(datExpr) %in% rownames(datExpr_filtered),]
+datGenes = datGenes_filtered %>% filter(ensembl_gene_id %in% rownames(datExpr_filtered))
+
+rm(datExpr_filtered, datGenes_filtered, dds)
+```
+
+***
+
+## Original z-score metric
+
+<br>
+
+$metric_i = max_j \frac{|x_{i,j} - mean(x_i)|}{sd(x_i)}$
+
+```{r}
+z_scores = datExpr %>% apply(1, function(x) abs(x-mean(x))/sd(x)) %>% t %>% data.frame
+```
+
+<br>
+
+### Outlier genes
+
+<br>
+
+Genes with the highest z-score in any of its entries
+
+```{r, warning=FALSE}
+max_z_scores = data.frame('ID' = rownames(z_scores), 'max_z_score' = z_scores %>% apply(1, max), 
+                          'outlier_sample' = z_scores %>% apply(1, function(x) datMeta$Sample_ID[which.max(x)])) %>%
+               left_join(DE_info, by = 'ID')
+                            
+
+ENSG00000187951_val = max_z_scores[max_z_scores$ID == 'ENSG00000187951',2]
+
+cat(paste0('Gene ARHGAP11B has a value of ', round(ENSG00000187951_val,1)))
+
+cat(paste0('There are ', sum(max_z_scores$max_z_score>ENSG00000187951_val),
+           ' genes with a value higher than this (~',
+           round(100*mean(max_z_scores$max_z_score>ENSG00000187951_val),2),'%)'))
+```
+
+The dotted line indicates the value for the gene we removed ARHGAP11B (ENSG00000187951)
+
+```{r, fig.width=10, warning=FALSE}
+
+summary(max_z_scores$max_z_score)
+
+p = max_z_scores %>% ggplot(aes(ID, max_z_score+1, color = DE)) + geom_point(alpha=0.3) + 
+                           geom_hline(yintercept = ENSG00000187951_val+1, color='gray', linetype = 'dotted') + 
+                           xlab('Genes') + ylab('Max |Z-score|') + theme_minimal() + scale_y_log10() +
+                           ggtitle('Max|z-score| value for each gene') +
+                           theme(axis.text.x=element_blank(), axis.ticks.x=element_blank(),
+                                 legend.position='none', panel.grid.major = element_blank())
+
+ggExtra::ggMarginal(p, type = 'density', margins='y', groupColour=TRUE, groupFill=TRUE, size=10)
+
+rm(p)
+```
+
+Top 20 genes
+
+- These genes have more than one outlier sample
+
+- All of the outliers corres pond to ASD samples
+
+- Standardising the max_z_score value of each gene, all of the 20 top genes would be considered outliers (more than 2 sd from the average max_z_score value)
+
+```{r, warning=FALSE, message=FALSE, fig.height=3, fig.width=10}
+
+plot_function = function(i){
+  i = 3*i-2
+  plot_list = list()
+  for(j in 1:3){
+    plot_data = data.frame('sample' = colnames(datExpr), 'expr' = t(datExpr[top_genes$ID[i+j-1],]),
+                           'Diagnosis' = datMeta$Diagnosis)
+    colnames(plot_data)[2] = 'expr'
+    plot_list[[j]] = ggplotly(plot_data %>% ggplot(aes(sample, expr, color=Diagnosis)) + 
+                              geom_point() + theme_minimal() + 
+                              theme(legend.position='none', axis.text.x=element_blank(), axis.ticks.x=element_blank()))
+  }
+  p = subplot(plot_list, nrows=1) %>% layout(annotations = list(
+    list(x = 0.1 , y = 1.05, text =  top_genes$hgnc_symbol[i], showarrow = F, xref='paper', yref='paper'),
+    list(x = 0.5 , y = 1.05, text = top_genes$hgnc_symbol[i+1], showarrow = F, xref='paper', yref='paper'),
+    list(x = 0.9 , y = 1.05, text = top_genes$hgnc_symbol[i+2], showarrow = F, xref='paper', yref='paper')))
+  
+  return(p)
+}
+
+top_genes = max_z_scores %>% dplyr::top_n(n=21, w=max_z_score) %>% arrange(desc(max_z_score)) %>% 
+            left_join(datGenes, by=c('ID' = 'ensembl_gene_id')) %>%
+            mutate('StandMaxZscore' = (max_z_score-mean(max_z_scores$max_z_score))/sd(max_z_scores$max_z_score)) %>%
+            dplyr::select(ID, hgnc_symbol, log2FoldChange, padj, DE, max_z_score, StandMaxZscore)
+
+kable(top_genes, caption='Top 20 genes with the highest max z-score value')
+
+plot_function(1)
+plot_function(2)
+plot_function(3)
+plot_function(4)
+plot_function(5)
+plot_function(6)
+plot_function(7)
+
+```
+
+<br>
+
+### Outlier samples
+
+<br>
+
+If there was no dependence between the samples and the outliers, then the maximum |z-scores| would be evenly distributed along the 88 samples, with ~183 maximum z-scores in each sample
+
+- The highest counts are grouped around a set of samples instead of being uniformly distributed
+
+- The patient the samples belong to seems to also play a small role (for example, AN02987 or AN07176)
+
+- Most samples with the highest counts belong to the ASD group
+
+- Brain Region doesn't seem to play a significant role in this
+
+- Samples with the highest counts come from both Batches (this information is not included in the plot)
+
+<br>
+
+**Defining outlier samples:** Samples with a **standardised** Count > 2 (everything above the dotted line)
+
+```{r, fig.width=10}
+samples_info = max_z_scores$outlier_sample %>% table %>% data.frame %>% 
+               dplyr::rename(Sample_ID = '.', Count = 'Freq') %>%
+               left_join(datMeta, by = 'Sample_ID')  %>% arrange(desc(Count)) %>% 
+               mutate('StandardisedCount' = round((Count-mean(Count))/sd(Count),2)) %>%
+               dplyr::select(Sample_ID, Count, StandardisedCount, Subject_ID, Sex, Age, Brain_lobe, Batch, Diagnosis)
+
+ggplotly(samples_info %>% ggplot(aes(Subject_ID, Count, fill=Diagnosis, color=Brain_lobe)) + 
+         geom_bar(stat = 'identity', size = 0, position = position_dodge2(preserve = 'single')) + xlab('Subjects') +
+         geom_hline(yintercept = nrow(max_z_scores)/nrow(datMeta), color = 'gray') + 
+         geom_hline(yintercept = mean(samples_info$Count)+2*sd(samples_info$Count), color = 'gray', linetype = 'dotted') + 
+         ggtitle('Number of genes for which their maximum |z-score| value fell in each Sample') + 
+         theme_minimal() + theme(axis.text.x = element_text(angle = 90, hjust = 1),
+                                 legend.position = 'none'))
+
+kable(samples_info %>% filter(Count>nrow(max_z_scores)/nrow(datMeta)), 
+      caption = 'Samples with more max z-scores than expected by random assignment')
+```
+
+<br>
+
+To see if the samples classified as outliers have a different general behaviour than the other samples (not just on the genes which had their maximum value in them), we calculate the z-score value each gene has on each sample and see their distribution
+
+The outlier samples seem to have a higher distribution of z-scores along all of the genes when comparing them to random samples, not just the one which corresponded to the max|z-score|
+
+```{r, fig.width=10, warning=FALSE, message=FALSE}
+plot_data = data.frame('ID' = rownames(datExpr))
+outlier_samples = samples_info$Sample_ID[samples_info$Count>mean(samples_info$Count)+2*sd(samples_info$Count)]
+
+# Calculate z-score of each gene for the outlier samples
+for(s in outlier_samples){
+  outlier_idx = which(datMeta$Sample_ID==s)
+  z_scores = apply(datExpr, 1, function(x) (abs(x[outlier_idx]-mean(x)))/sd(x))
+  plot_data = cbind(plot_data, z_scores)
+}
+colnames(plot_data)[-1] = as.character(outlier_samples)
+
+# Select random samples for comparison
+set.seed(123)
+rand_samp_1 = sample(datMeta$Sample_ID[! datMeta$Sample_ID %in% outlier_samples],1) %>% as.character
+rand_samp_idx_1 = which(datMeta$Sample_ID==rand_samp_1)
+set.seed(124)
+rand_samp_2 = sample(datMeta$Sample_ID[! datMeta$Sample_ID %in% outlier_samples],1) %>% as.character
+rand_samp_idx_2 = which(datMeta$Sample_ID==rand_samp_2)
+set.seed(125)
+rand_samp_3 = sample(datMeta$Sample_ID[! datMeta$Sample_ID %in% outlier_samples],1) %>% as.character
+rand_samp_idx_3 = which(datMeta$Sample_ID==rand_samp_3)
+cat(paste0('Using random samples ', rand_samp_1, ', ', rand_samp_2, ', ', rand_samp_3, ' as a reference'))
+
+z_func = function(x, rand_samp_idx) return(abs(x[rand_samp_idx]-mean(x))/sd(x))
+
+# Transform data for plotting
+levels = c(unique(as.character(samples_info$Sample_ID[samples_info$StandardisedCount>2])),
+           'Random Sample 1','Random Sample 2','Random Sample 3')
+plot_data_melt = plot_data %>% mutate('Random Sample 1'=apply(datExpr,1,function(x) z_func(x, rand_samp_idx_1)),
+                                      'Random Sample 2'=apply(datExpr,1,function(x) z_func(x, rand_samp_idx_2)),
+                                      'Random Sample 3'=apply(datExpr,1,function(x) z_func(x, rand_samp_idx_3))) %>%
+                 melt()  %>% mutate(variable = factor(variable, levels=levels, ordered=T)) %>%
+                 mutate(Sample_ID = case_when(variable == 'Random Sample 1' ~ rand_samp_1,
+                                              variable == 'Random Sample 2' ~ rand_samp_2,
+                                              variable == 'Random Sample 3' ~ rand_samp_3,
+                                              TRUE ~ as.character(variable))) %>%
+                 left_join(datMeta %>% dplyr::select(Sample_ID, Diagnosis), by = 'Sample_ID')
+
+# Plot
+ggplotly(plot_data_melt %>% ggplot(aes(variable, value+1, fill=Diagnosis)) + geom_boxplot() +
+         xlab('Samples') +ylab('|z-scores|') + scale_y_log10() + theme_minimal() + 
+         theme(axis.text.x = element_text(angle = 90, hjust = 1)))
+
+
+rm(plot_data, plot_data_melt, s, outlier_idx, z_scores, rand_samp_1, rand_samp_idx_1,
+   rand_samp_2, rand_samp_idx_2, rand_samp_3, rand_samp_idx_3, levels, z_func)
+```
+
+<br>
+
+####  Metric currently used to filter samples vs z-score
+
+<br>
+
+Currently used metric:
+
+- Create weighted **sample** correlation network
+
+- Calculate the connectivity of each node
+
+- Normalise connectivity of the nodes (samples)
+
+- Filter nodes (samples) with a connectivity lower than -2 (low connectivity, with a distance larger than 2 sd to the mean connectivity of the network)
+
+<br>
+
+Notes:
+
+- All of the outlier samples belong to ASD patients
+
+- Both methods agree on some samples, but others, such as AN13872_BA4_6, which the 2nd highest number of max |z-score| wouldn't have been picked up by the original method
+
+```{r warning=FALSE}
+
+absadj = datExpr %>% bicor %>% abs
+netsummary = fundamentalNetworkConcepts(absadj)
+ku = netsummary$Connectivity
+z.ku = (ku-mean(ku))/sqrt(var(ku))
+
+original_z_score = data.frame('ID' = gsub('X','',names(z.ku)), 'z_score_orig' = as.vector(z.ku)) %>%
+                   left_join(datMeta, by = c('ID' = 'Dissected_Sample_ID')) %>% 
+                   dplyr::select(Sample_ID, z_score_orig)
+
+plot_data = samples_info %>% left_join(original_z_score, by = 'Sample_ID') %>% 
+            mutate('norm_count' = (Count-mean(Count))/sd(Count))
+
+ggplotly(plot_data %>% ggplot(aes(z_score_orig, norm_count, color=Diagnosis)) + 
+         geom_point(alpha=0.8, aes(id=Sample_ID)) + 
+         geom_vline(xintercept = -2, color='gray', linetype = 'dotted') + 
+         geom_hline(yintercept = 2, color='gray', linetype = 'dotted') + 
+         xlab('Currently used metric') + ylab('Standardised number of max |z-score| genes in sample') + 
+         theme_minimal())
+
+rm(absadj, netsummary, ku, z.ku, original_z_score)
+```
+
+I think the original metric used to classify samples as outliers agrees better with the PCA plot, although they are quite similar
+
+```{r, warning=FALSE, fig.width=10}
+
+pca = datExpr %>% t %>% prcomp
+
+pca_data = data.frame('ID' = gsub('X','',colnames(datExpr)), 'PC1' = pca$x[,1], 'PC2' = pca$x[,2]) %>%
+                 left_join(datMeta, by=c('ID'='Dissected_Sample_ID')) %>%
+           dplyr::select(Sample_ID, PC1, PC2) %>% left_join(plot_data, by = 'Sample_ID')
+
+p1 = ggplotly(pca_data %>% ggplot(aes(PC1, PC2, color=-StandardisedCount)) + 
+              geom_point(alpha=0.8, aes(id=Sample_ID)) +
+              xlab(paste0('PC1 (', round(100*summary(pca)$importance[2,1],1),'%)')) +
+              ylab(paste0('PC2 (', round(100*summary(pca)$importance[2,2],1),'%)')) +
+              scale_color_viridis() + theme_minimal() + theme(legend.position = 'none') + 
+              coord_fixed())
+
+p2 = ggplotly(pca_data %>% ggplot(aes(PC1, PC2, color=z_score_orig)) +
+              geom_point(alpha=0.8, aes(id=Sample_ID)) +
+              xlab(paste0('PC1 (', round(100*summary(pca)$importance[2,1],1),'%)')) +
+              ylab(paste0('PC2 (', round(100*summary(pca)$importance[2,2],1),'%)')) +
+              ggtitle('Outlier genes in each sample (left) and Original sample outlier metric (right)') +
+              scale_color_viridis() + 
+              theme_minimal() + theme(legend.position = 'none') + coord_fixed())
+
+subplot(p1, p2, nrows=1)
+
+rm(pca, pca_data, p1, p2)
+```
+
+
+<br><br>
+
+***
+
+***
+
+<br><br>
+
+## Robust  z-score metric
+
+<br>
+
+$metric_i = max_j \frac{|x_{i,j} - median(x_i)|}{mad(x_i)}$
+
+```{r}
+z_scores = datExpr %>% apply(1, function(x) abs(x-median(x))/mad(x)) %>% t %>% data.frame
+```
+
+<br>
+
+### Outlier genes
+
+<br>
+
+Genes with the highest z-score in any of their entries
+
+```{r, warning=FALSE}
+max_z_scores = data.frame('ID' = rownames(z_scores), 'max_z_score' = z_scores %>% apply(1, max), 
+                          'outlier_sample' = z_scores %>% apply(1, function(x) datMeta$Sample_ID[which.max(x)])) %>%
+               left_join(DE_info, by = 'ID')
+                            
+
+ENSG00000187951_val = max_z_scores[max_z_scores$ID == 'ENSG00000187951',2]
+
+cat(paste0('Gene ARHGAP11B has a value of ', round(ENSG00000187951_val,1)))
+
+cat(paste0('There are ', sum(max_z_scores$max_z_score>ENSG00000187951_val),
+           ' genes with a value higher than this (~',
+           round(100*mean(max_z_scores$max_z_score>ENSG00000187951_val),2),'%)'))
+```
+
+The dotted line indicates the value for the gene we removed ARHGAP11B (ENSG00000187951)
+
+```{r, fig.width=10, warning=FALSE}
+
+summary(max_z_scores$max_z_score)
+
+p = max_z_scores %>% ggplot(aes(ID, max_z_score+1, color = DE)) + geom_point(alpha=0.3) + 
+                           geom_hline(yintercept = ENSG00000187951_val+1, color='gray', linetype = 'dotted') + 
+                           xlab('Genes') + ylab('Max |Z-score|') + theme_minimal() + scale_y_log10() +
+                           ggtitle('Max|z-score| value for each gene') +
+                           theme(axis.text.x=element_blank(), axis.ticks.x=element_blank(),
+                                 legend.position='none', panel.grid.major = element_blank())
+
+ggExtra::ggMarginal(p, type = 'density', margins='y', groupColour=TRUE, groupFill=TRUE, size=10)
+
+rm(p)
+```
+
+Top 20 genes
+
+- These genes have more than one outlier sample
+
+- All of the outliers corres pond to ASD samples
+
+- **There seem to be a lot of DE genes**
+
+- **The standardised max_z_score values of each of the top genes are huge!** Probably because of the really long right tail of this metric's distribution
+
+```{r, warning=FALSE, message=FALSE, fig.height=3, fig.width=10}
+
+plot_function = function(i){
+  i = 3*i-2
+  plot_list = list()
+  for(j in 1:3){
+    plot_data = data.frame('sample' = colnames(datExpr), 'expr' = t(datExpr[top_genes$ID[i+j-1],]),
+                           'Diagnosis' = datMeta$Diagnosis)
+    colnames(plot_data)[2] = 'expr'
+    plot_list[[j]] = ggplotly(plot_data %>% ggplot(aes(sample, expr, color=Diagnosis)) + 
+                              geom_point() + theme_minimal() + 
+                              theme(legend.position='none', axis.text.x=element_blank(), axis.ticks.x=element_blank()))
+  }
+  p = subplot(plot_list, nrows=1) %>% layout(annotations = list(
+    list(x = 0.1 , y = 1.05, text =  top_genes$hgnc_symbol[i], showarrow = F, xref='paper', yref='paper'),
+    list(x = 0.5 , y = 1.05, text = top_genes$hgnc_symbol[i+1], showarrow = F, xref='paper', yref='paper'),
+    list(x = 0.9 , y = 1.05, text = top_genes$hgnc_symbol[i+2], showarrow = F, xref='paper', yref='paper')))
+  
+  return(p)
+}
+
+top_genes = max_z_scores %>% dplyr::top_n(n=21, w=max_z_score) %>% arrange(desc(max_z_score)) %>% 
+            left_join(datGenes, by=c('ID' = 'ensembl_gene_id')) %>%
+            mutate('StandMaxZscore' = (max_z_score-mean(max_z_scores$max_z_score))/sd(max_z_scores$max_z_score)) %>%
+            dplyr::select(ID, hgnc_symbol, log2FoldChange, padj, DE, max_z_score, StandMaxZscore)
+
+kable(top_genes, caption='Top 20 genes with the highest max z-score value')
+
+plot_function(1)
+plot_function(2)
+plot_function(3)
+plot_function(4)
+plot_function(5)
+plot_function(6)
+plot_function(7)
+
+```
+
+<br>
+
+### Outlier samples
+
+<br>
+
+The distribution of the genes with the max |z-score| is exactly the same as in the previous section because the two metrics are a monotonic transformation of the entries by row (by gene), so the maximum of each row is reached in the same sample in both metrics
+
+<br>
+
+To see if the samples classified as outliers have a different general behaviour than the other samples (not just on the genes which had their maximum value in them), we calculate the z-score value each gene has on each sample and see their distribution.
+
+The outlier samples seem to have a higher distribution of z-scores along all of the genes when comparing them to random samples, not just the one which corresponded to the max|z-score|
+
+The results are very similar to the ones from the first metric
+
+```{r, fig.width=10, warning=FALSE, message=FALSE}
+plot_data = data.frame('ID' = rownames(datExpr))
+outlier_samples = samples_info$Sample_ID[samples_info$Count>mean(samples_info$Count)+2*sd(samples_info$Count)]
+
+# Calculate z-score of each gene for the outlier samples
+for(s in outlier_samples){
+  outlier_idx = which(datMeta$Sample_ID==s)
+  z_scores = apply(datExpr, 1, function(x) (abs(x[outlier_idx]-median(x)))/mad(x))
+  plot_data = cbind(plot_data, z_scores)
+}
+colnames(plot_data)[-1] = as.character(outlier_samples)
+
+# Select random samples for comparison
+set.seed(123)
+rand_samp_1 = sample(datMeta$Sample_ID[! datMeta$Sample_ID %in% outlier_samples],1) %>% as.character
+rand_samp_idx_1 = which(datMeta$Sample_ID==rand_samp_1)
+set.seed(124)
+rand_samp_2 = sample(datMeta$Sample_ID[! datMeta$Sample_ID %in% outlier_samples],1) %>% as.character
+rand_samp_idx_2 = which(datMeta$Sample_ID==rand_samp_2)
+set.seed(125)
+rand_samp_3 = sample(datMeta$Sample_ID[! datMeta$Sample_ID %in% outlier_samples],1) %>% as.character
+rand_samp_idx_3 = which(datMeta$Sample_ID==rand_samp_3)
+cat(paste0('Using random samples ', rand_samp_1, ', ', rand_samp_2, ', ', rand_samp_3, ' as a reference'))
+
+z_func = function(x, rand_samp_idx) return(abs(x[rand_samp_idx]-mean(x))/sd(x))
+
+# Transform data for plotting
+levels = c(unique(as.character(samples_info$Sample_ID[samples_info$StandardisedCount>2])),
+           'Random Sample 1','Random Sample 2','Random Sample 3')
+plot_data_melt = plot_data %>% mutate('Random Sample 1'=apply(datExpr,1,function(x) z_func(x, rand_samp_idx_1)),
+                                      'Random Sample 2'=apply(datExpr,1,function(x) z_func(x, rand_samp_idx_2)),
+                                      'Random Sample 3'=apply(datExpr,1,function(x) z_func(x, rand_samp_idx_3))) %>%
+                 melt()  %>% mutate(variable = factor(variable, levels=levels, ordered=T)) %>%
+                 mutate(Sample_ID = case_when(variable == 'Random Sample 1' ~ rand_samp_1,
+                                              variable == 'Random Sample 2' ~ rand_samp_2,
+                                              variable == 'Random Sample 3' ~ rand_samp_3,
+                                              TRUE ~ as.character(variable))) %>%
+                 left_join(datMeta %>% dplyr::select(Sample_ID, Diagnosis), by = 'Sample_ID')
+
+# Plot
+ggplotly(plot_data_melt %>% ggplot(aes(variable, value+1, fill=Diagnosis)) + geom_boxplot() +
+         xlab('Samples') +ylab('|z-scores|') + scale_y_log10() + theme_minimal() + 
+         theme(axis.text.x = element_text(angle = 90, hjust = 1)))
+
+
+rm(plot_data, plot_data_melt, s, outlier_idx, z_scores, rand_samp_1, rand_samp_idx_1,
+   rand_samp_2, rand_samp_idx_2, rand_samp_3, rand_samp_idx_3, levels, z_func)
+```
+
+<br>
+
+####  Metric currently used to filter samples vs z-score
+
+<br>
+
+The plot is exactly the same as with the first metric, since the maximums by row happen in the same columns, so the counts by sample are the same in both methods
+
+<br><br>
+
+## Direct comparison between metrics
+
+We know that when using the metrics for sample outlier detection they give exactly the same results, but they seem to vary greatly when using them for gene outlier detection
+
+Using a distance of 3 standard deviations to define outliers in both methods:
+
+- They both detect gene ARHGAP11B as an outlier (only point with transparency = 0)
+
+- They tend to agree but not very strongly
+
+```{r, warning=FALSE, message=FALSE}
+
+plot_data = data.frame('ID' = rownames(datExpr),
+                       'orig_z_score' = apply(datExpr, 1, function(x) max(abs(x-mean(x))/sd(x))),
+                       'robust_z_score' = apply(datExpr, 1, function(x) max(abs(x-median(x))/mad(x)))) %>%
+            mutate(outliers_orig_z_score = orig_z_score > mean(orig_z_score) + 3*sd(orig_z_score),
+                   outliers_robust_z_score = robust_z_score > mean(robust_z_score) + 3*sd(robust_z_score),
+                   alpha = ifelse(ID == 'ENSG00000187951', 1, 0.2)) %>%
+            mutate(Outliers = case_when(outliers_orig_z_score & outliers_robust_z_score ~ 'Both',
+                                        outliers_orig_z_score & !outliers_robust_z_score ~ 'Only Original',
+                                        !outliers_orig_z_score & outliers_robust_z_score ~ 'Only Robust',
+                                        TRUE ~ 'Neither')) %>%
+            mutate(Outliers = factor(Outliers, levels = c('Neither','Only Original', 'Only Robust', 'Both')))
+
+plot_data %>% ggplot(aes(orig_z_score, robust_z_score, color=Outliers)) + geom_point(alpha=plot_data$alpha) +
+              geom_vline(xintercept = mean(plot_data$orig_z_score) + 3*sd(plot_data$orig_z_score),
+                         color = 'gray', linetype = 'dashed') +
+              geom_hline(yintercept = mean(plot_data$robust_z_score) + 3*sd(plot_data$robust_z_score),
+                         color = 'gray', linetype = 'dashed') +
+              geom_smooth(method = 'gam', se = FALSE, color='gray') + 
+              ggtitle(paste0('R^2 = ', round(cor(plot_data$orig_z_score, plot_data$robust_z_score)[[1]]^2,2))) +
+              scale_y_log10() + scale_color_viridis_d() + xlab('Original max|z-score|') +
+              ylab('Robust max|z-score|') + theme_minimal()
+
+
+table_info = plot_data %>% apply_labels(outliers_orig_z_score = 'Outliers using Original Metric',
+                                        outliers_robust_z_score = 'Outliers using Robust Metric')
+
+cro(table_info$outliers_orig_z_score, list(table_info$outliers_robust_z_score, total()))
+
+rm(table_info)
+```
+
+<br>
+
+### Relation to DEA Results
+
+<br>
+
+Repeating the plot above but colouring genes depending on whether they are DE or not:
+
+- **The robust metric seems to be giving higher values to the DE genes:** this could be a problem, for example, for genes which have a strong disregulation in ASD, which could be labelled as outliers and filtered out of the dataset ... or maybe it's the other way around, and the DE algorithm is identifying genes as statistically significant that have many outlier values due to technical artifacts instead of biological significance...
+
+```{r, warning=FALSE, message=FALSE}
+
+plot_data = data.frame('ID' = rownames(datExpr),
+                       'orig_z_score' = apply(datExpr, 1, function(x) max(abs(x-mean(x))/sd(x))),
+                       'robust_z_score' = apply(datExpr, 1, function(x) max(abs(x-median(x))/mad(x))),
+                       'meanExpr' = log2(rowMeans(datExpr))) %>%
+            left_join(DE_info, by = 'ID') %>%
+            mutate(outliers_orig_z_score = orig_z_score > mean(orig_z_score) + 3*sd(orig_z_score),
+                   outliers_robust_z_score = robust_z_score > mean(robust_z_score) + 3*sd(robust_z_score),
+                   alpha = ifelse(ID == 'ENSG00000187951', 1, 0.2))
+
+plot_data %>% ggplot(aes(orig_z_score, robust_z_score, color=DE)) + geom_point(alpha=plot_data$alpha) +
+              geom_vline(xintercept = mean(plot_data$orig_z_score) + 3*sd(plot_data$orig_z_score),
+                         color = 'gray', linetype = 'dashed') +
+              geom_hline(yintercept = mean(plot_data$robust_z_score) + 3*sd(plot_data$robust_z_score),
+                         color = 'gray', linetype = 'dashed') +
+              geom_smooth(method = 'gam', se = FALSE) + 
+              ggtitle(paste0('R^2 = ', round(cor(plot_data$orig_z_score, plot_data$robust_z_score)[[1]]^2,2))) +
+              scale_y_log10() + xlab('Original max|z-score|') + ylab('Robust max|z-score|') + theme_minimal()
+
+rm(table_info)
+```
+<br>
+
+If we order the genes by their max|z-score| and calculate the percentage of DE genes using a rolling average, we can see if there's a change in this percentage of DE genes for different levels of the metric:
+
+This plot corroborates what we were seeing above: The genes with the highest values in the robust metric have a higher density of DE genes than the rest of the genes
+
+This could mean:
+
+- The metric is capturing genes with a strong biological signal
+
+- The DE function is capturing genes with technical errors
+
+- Both?
+
+This wouldn't be a problem if all the outlier values in these genes didn't correspond to ASD samples ...
+
+**Note:** The genes in this plot are ordered by their max|z-score| value, so there are actually two orderings of genes in the plot, one for the original metric and the other for the robust metric. That's why there are different patterns in the % of DE genes for each metric
+
+```{r, warning=FALSE, message=FALSE}
+
+w = 1000
+sliding_DE = data.frame('window' = 1:(nrow(datExpr)-w), 'original' = 0, 'robust' = 0)
+original_sort = plot_data %>% arrange(orig_z_score)
+robust_sort = plot_data %>% arrange(robust_z_score)
+
+for(i in 1:nrow(sliding_DE)){
+  sliding_DE$original[i] = mean(original_sort$DE[i:(i+w)], na.rm = TRUE)
+  sliding_DE$robust[i] = mean(robust_sort$DE[i:(i+w)], na.rm = TRUE)
+}
+
+sliding_DE %>% melt(id.vars='window') %>% dplyr::rename(Metric = variable) %>% 
+               ggplot(aes(window, 100*value, color=Metric)) + geom_line(alpha=0.3) + 
+               geom_hline(yintercept = 100*mean(plot_data$DE, na.rm=TRUE), color = 'gray') + 
+               geom_smooth(se=FALSE) + ylab('% DE genes in window') + 
+               scale_color_manual(values = c('#e60073','#008080')) + theme_minimal()
+
+rm(w, sliding_DE, original_sort, robust_sort, i)
+```
+
+If we plot now the rolling mean of the |LFC|:
+
+- For both metrics the LFC increases as the value of the metric increases (this makes sense, because the outliers belong to ASD samples)
+
+- The |LFC| increases more in the robust version of the metric than in the original
+
+```{r, warning=FALSE, message=FALSE}
+w = 1000
+sliding_DE = data.frame('window' = 1:(nrow(datExpr)-w), 'original' = 0, 'robust' = 0)
+original_sort = plot_data %>% arrange(orig_z_score)
+robust_sort = plot_data %>% arrange(robust_z_score)
+
+for(i in 1:nrow(sliding_DE)){
+  sliding_DE$original[i] = mean(abs(original_sort$log2FoldChange[i:(i+w)]), na.rm = TRUE)
+  sliding_DE$robust[i] = mean(abs(robust_sort$log2FoldChange[i:(i+w)]), na.rm = TRUE)
+}
+
+sliding_DE %>% melt(id.vars='window') %>% dplyr::rename(Metric = variable) %>% 
+               ggplot(aes(window, 100*value, color=Metric)) + geom_line(alpha=0.3) + 
+               geom_hline(yintercept = 100*mean(plot_data$log2FoldChange, na.rm=TRUE), color = 'gray') + 
+               geom_smooth(se=FALSE) + ylab('Mean |LFC| of genes in window') + 
+               scale_color_manual(values = c('#e60073','#008080')) + theme_minimal()
+
+rm(w, sliding_DE, original_sort, robust_sort, i)
+```
+
+**For the first half of the plot (~windows 0-7500):** |LFC| remains roughly constant but %DE decreases steadily
+
+- Even though the change between Diagnoses remains the same, the increase in outlier samples (reflected in the position of the genes in a higher window) decreases the significance of the comparison, resulting in higher (and no longer significant) p-values
+
+- This means that the presence of outliers decreases the confidence of the DEA
+
+<br>
+
+**For the second half of the plot (~windows 7500-1500):** The %DE genes remains constant using the original metric but increases (maybe exponentially?) using the robust metric. At the same time, the |LFC| increases steadily on both metrics, but at a higher rate in the robust metric
+
+- For the Original metric we can give a similar conclusion as in the first half of the plot: The more extreme the outliers of a gene are, the more they damage the confidence of the DEA, resulting in genes with very high |LFC| that share the same level of confidence with genes with a not so extreme |LFC|
+
+- For the Robust metric, both the % of DE genes and the |LFC| increase, which sounds reasonable. The only problem with this is that we don't know if this increase in DE genes is because of biological signals which are being mistaken for technical effects by the max|z-score|, or technical effects which are confused by biological signals by DESeq2. This problem is specific to this dataset, since consistently, the outlier values correspond to ASD samples
+
+<br>
+
+### Relation to Level of Expression
+
+<br>
+
+If we plot the rolling mean of the mean level of expression of the genes:
+
+- The level of expression plays an important role in both of the scores (...of course)
+
+- Genes with lower mean expression tend to have larger max|z-score| values, for both versions of the metric
+
+```{r}
+w = 1000
+sliding_DE = data.frame('window' = 1:(nrow(datExpr)-w), 'original' = 0, 'robust' = 0)
+original_sort = plot_data %>% arrange(orig_z_score)
+robust_sort = plot_data %>% arrange(robust_z_score)
+
+for(i in 1:nrow(sliding_DE)){
+  sliding_DE$original[i] = mean(original_sort$meanExpr[i:(i+w)], na.rm = TRUE)
+  sliding_DE$robust[i] = mean(robust_sort$meanExpr[i:(i+w)], na.rm = TRUE)
+}
+
+sliding_DE %>% melt(id.vars='window') %>% dplyr::rename(Metric = variable) %>% 
+               ggplot(aes(window, 100*value, color=Metric)) + geom_line(alpha=0.3) + 
+               geom_hline(yintercept = 100*mean(plot_data$meanExpr, na.rm=TRUE), color = 'gray') + 
+               geom_smooth(se=FALSE) + ylab('Mean Mean Level of Expression in window') + 
+               scale_color_manual(values = c('#e60073','#008080')) + theme_minimal()
+
+rm(w, sliding_DE, original_sort, robust_sort, i)
+```
+
+
+<br>
+
+## Conclusions
+
+<br>
+
+- When using these methods to identify outlier samples, they give exactly the same results because they are both a monotonic transformation by rows of the counts data, so the maximums are achieved in the same positions (samples) in both cases
+
+- When using these methods to identify outlier genes, they give different results, the first one identifying genes with a single, huge outlier, and the second one identifying genes with multiple big outliers
+
+- I think the first metric could be better since a single huge outlier is almost certainly a technical error and not a biological effect, but this distinction would be more difficult to distinguish with the second metric, where it identifies multiple outliers (I think the linear fits on the plot above proves that this could be happening up to some extent)
+
+- Could the relation between the robust metric and DE genes be the opposite and the robust metric is showing a weakness in the identification of DE genes when there are multiple technical errors? In this case, the Robust metric could help identify "fake" DE genes ... but since this behaviour is unique to this dataset I don't know how relevant it would be to study it, since just a comparison with another dataset (Gupta) could eliminate these false positives
+
+- Mean expression plays a role in the value of both metrics, with genes with lower levels of expression having higher scores in both metrics. This could also be playing a role in the top two plots, since LFC has a negative relation with level of expression, and genes with high expression have a better ratio of noise/signal than low expressed genes, which could help reduce the p-values and push more genes below the threshold to be considered DE
+
+<br><br>
