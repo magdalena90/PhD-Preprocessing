@@ -1,0 +1,272 @@
+---
+title: 'Enrichment Analysis of Modules with highest Enrichment in SFARI Genes'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+```{r load_packages, warning=FALSE, message=FALSE}
+#setwd('/afs/inf.ed.ac.uk/user/s17/s1725186/Documents/PhD-Models/FirstPUModel/RMarkdowns')
+
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(dendextend)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally)
+library(expss)
+library(knitr)
+library(anRichment) #; library(BrainDiseaseCollection)
+```
+
+
+Load preprocessed dataset (preprocessing code in 19_10_14_data_preprocessing.Rmd) and clustering (pipeline in 19_10_21_WGCNA.Rmd)
+```{r load_dataset, message=FALSE, warning=FALSE}
+
+# Gandal dataset
+load('./../Data/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+DE_info = DE_info %>% data.frame
+
+
+# GO Neuronal annotations: regex 'neuron' in GO functional annotations and label the genes that make a match as neuronal
+GO_annotations = read.csv('./../Data/genes_GO_annotations.csv')
+GO_neuronal = GO_annotations %>% filter(grepl('neuron', go_term)) %>% 
+              mutate('ID'=as.character(ensembl_gene_id)) %>% 
+              dplyr::select(-ensembl_gene_id) %>% distinct(ID) %>%
+              mutate('Neuronal'=1)
+
+
+# SFARI Genes
+SFARI_genes = read_csv('./../../../SFARI/Data/SFARI_genes_08-29-2019_w_ensembl_IDs.csv')
+SFARI_genes = SFARI_genes[!duplicated(SFARI_genes$ID) & !is.na(SFARI_genes$ID),]
+
+
+# Clusterings
+clusterings = read_csv('./../Data/clusters.csv')
+
+
+# Update DE_info with SFARI and Neuronal information
+genes_info = DE_info %>% mutate('ID'=rownames(.)) %>% left_join(SFARI_genes, by='ID') %>% 
+  mutate(`gene-score`=ifelse(is.na(`gene-score`), 'None', `gene-score`)) %>%
+  left_join(GO_neuronal, by='ID') %>% left_join(clusterings, by='ID') %>%
+  mutate(Neuronal=ifelse(is.na(Neuronal), 0, Neuronal)) %>%
+  mutate(gene.score=ifelse(`gene-score`=='None' & Neuronal==1, 'Neuronal', `gene-score`), 
+         significant=padj<0.05 & !is.na(padj))
+
+
+clustering_selected = 'DynamicHybrid'
+genes_info$Module = genes_info[,clustering_selected]
+
+dataset = read.csv(paste0('./../Data/dataset_', clustering_selected, '.csv'))
+dataset$Module = dataset[,clustering_selected]
+
+# Correct SFARI Scores
+dataset$gene.score = genes_info$gene.score
+
+# Enrichment Analysis
+load('./../Data/enrichmentAnalysis.RData')
+
+
+SFARI_colour_hue = function(r) {
+  pal = c('#FF7631','#FFB100','#E8E328','#8CC83F','#62CCA6','#59B9C9','#b3b3b3','#808080','gray','#d9d9d9')[r]
+}
+
+rm(DE_info, GO_annotations, clusterings, getinfo, mart, dds, GO_neuronal)
+```
+
+
+## Calculate the Enrichment of SFARI Genes in Modules
+<br>
+
+This is explained in 20_05_22_WGCNA_top_SFARI_modules.html
+
+```{r warning=FALSE, message=FALSE}
+SFARI_genes_by_module = dataset %>% mutate('hasSFARIscore' = !gene.score %in% c('None', 'Neuronal')) %>% 
+                        group_by(Module, MTcor, hasSFARIscore) %>% summarise(s=n()) %>% 
+                        left_join(dataset %>% group_by(Module) %>% summarise(n=n()), by='Module') %>% 
+                        mutate(perc=round(s/n*100,2)) %>% filter(hasSFARIscore & Module != 'gray') %>% arrange(desc(perc)) %>% ungroup
+
+N = sum(SFARI_genes_by_module$n)
+S = sum(SFARI_genes_by_module$s)
+
+calc_prob = function(row, log.p, S){
+  s = row[4] %>% as.numeric
+  n = row[5] %>% as.numeric
+  prob = phyper(s, S, N-S, n, log.p = log.p, lower.tail=FALSE)
+  return(prob)
+}
+
+SFARI_genes_by_module$prob = apply(SFARI_genes_by_module, 1, function(x) calc_prob(x, FALSE, S))
+SFARI_genes_by_module$adj_prob = p.adjust(SFARI_genes_by_module$prob, method = 'bonferroni')
+SFARI_genes_by_module = SFARI_genes_by_module %>% arrange(prob)
+
+ggplotly(SFARI_genes_by_module %>% ggplot(aes(MTcor, prob, size=n)) + geom_point(color=SFARI_genes_by_module$Module, alpha=0.5, aes(id=Module)) + 
+         geom_smooth(color='#cccccc', size = 0.5, se=FALSE) + xlab('Module-Diagnosis Correlation') + ylab('Probability') + 
+         ggtitle(paste0('Corr = ', round(cor(SFARI_genes_by_module$MTcor, SFARI_genes_by_module$prob),2), ': Corr[Module-ASD corr<0] = ', 
+                        round(cor(SFARI_genes_by_module$MTcor[SFARI_genes_by_module$MTcor<0], SFARI_genes_by_module$prob[SFARI_genes_by_module$MTcor<0]),3),
+                        ' Corr[Module-ASD corr>0] = ',
+                        round(cor(SFARI_genes_by_module$MTcor[SFARI_genes_by_module$MTcor>=0], SFARI_genes_by_module$prob[SFARI_genes_by_module$MTcor>=0]),2))) +
+         theme_minimal() + theme(legend.position = 'none'))
+
+```
+
+<br><br>
+
+### Selecting Top Modules Enriched in SFARI Genes
+<br>
+
+We can interpet the probability we obtain as a p-value (and correct it for multiple testing), we can use it as a threshold to identify modules with a significantly high percentage of SFARI genes (adjusted p-value < 0.01)
+
+Using log-scale to help us differentiate between small differences close to zero better
+
+```{r warning=FALSE, message=FALSE}
+
+ggplotly(SFARI_genes_by_module %>% ggplot(aes(MTcor, adj_prob, size=n)) + geom_point(color=SFARI_genes_by_module$Module, alpha=0.5, aes(id=Module)) +
+         geom_hline(yintercept = 0.05, color = 'gray', linetype = 'dotted') + xlab('Module-Diagnosis Correlation') + ylab('Corrected p-values') + scale_y_log10() +
+         theme_minimal() + theme(legend.position = 'none'))
+
+top_modules = SFARI_genes_by_module$Module[SFARI_genes_by_module$adj_prob <0.05]
+
+cat(paste0('Keeping top ', length(top_modules),' modules: ', paste(top_modules, collapse = ', ')))
+
+rm(N,S,calc_prob)
+```
+
+<br>
+
+## Enrichment Analysis
+
+```{r}
+file_name = './../Data/enrichmentAnalysis.RData'
+
+if(file.exists(file_name)){
+  load(file_name)
+} else {
+  
+  ##############################################################################
+  # PREPARE DATASET
+  # Create dataset with top modules membership and removing the genes without an assigned module
+  EA_dataset = data.frame('ensembl_gene_id' = genes_info$ID, module = genes_info$Module)  %>%
+               filter(genes_info$Module!='gray')
+  
+  # Assign Entrez Gene Id to each gene
+  getinfo = c('ensembl_gene_id','entrezgene')
+  mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl', host='feb2014.archive.ensembl.org')
+  biomart_output = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=EA_dataset$ensembl_gene_id, mart=mart)
+  
+  EA_dataset = EA_dataset %>% left_join(biomart_output, by='ensembl_gene_id')
+  
+  for(tm in top_modules){
+    cat(paste0('\n',sum(EA_dataset$module==tm & is.na(EA_dataset$entrezgene)), ' genes from top module ',
+               tm, ' don\'t have an Entrez Gene ID')) 
+  }
+  
+  rm(getinfo, mart, biomart_output, tm)
+  
+  
+  ##############################################################################
+  # PERFORM ENRICHMENT ANALYSIS
+  # Manual: https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/GeneAnnotation/Tutorials/anRichment-Tutorial1.pdf
+  
+  collectGarbage()
+  
+  # Prepare datasets
+  GO_col = buildGOcollection(organism = 'human', verbose = 0)
+  biosys_col = BioSystemsCollection('human')
+  internal_col = internalCollection(organism = 'human')
+  #MillerAIBS_col = MillerAIBSCollection(organism = 'human') # Information already contained in internalCollection
+  #BrainDisease_col = BrainDiseaseCollection(organism = 'human') # Information already contained in internalCollection
+  
+  combined_col = mergeCollections(GO_col, biosys_col, internal_col)
+  
+  # Print collections used
+  cat('Using collections: ')
+  knownGroups(combined_col, sortBy = 'size')
+  
+  # Perform Enrichment Analysis
+  enrichment = enrichmentAnalysis(classLabels = EA_dataset$module, identifiers = EA_dataset$entrezgene,
+                                  refCollection = combined_col, #useBackground = 'given', 
+                                  threshold = 1e-4, thresholdType = 'Bonferroni',
+                                  getOverlapEntrez = FALSE, getOverlapSymbols = TRUE)
+  
+  # Save enrichment results
+  save(enrichment, file=file_name)
+  
+  rm(GO_col, biosys_col, internal_col, BrainDisease_col, combined_col, EA_dataset)
+}
+
+```
+<br>
+
+### KEGG Results
+
+```{r, results = 'asis'}
+
+for(i in 1:length(top_modules)){
+  df = enrichment$enrichmentTable %>% filter(class==top_modules[i] & grepl('BioSystems.KEGG',dataSetID) & Bonferroni<0.05) %>% 
+        dplyr::select(dataSetID, shortDataSetName, inGroups, Bonferroni, FDR, enrichmentRatio, effectiveClassSize, effectiveSetSize, nCommonGenes) %>%
+        arrange(Bonferroni, desc(enrichmentRatio))
+  if(nrow(df)>0){
+    print(kable(df, caption = paste0('Enriched terms for module ', top_modules[i], ' (SFARI Genes = ',
+                                    round(SFARI_genes_by_module$perc[SFARI_genes_by_module$Module==top_modules[i]][1],4), '%)')))
+    cat('\n') 
+  } else cat(paste0('\nNo enrichment found for module ',top_modules[i],'\n'))
+}
+
+rm(i, df)
+```
+<br>
+
+### Reactome Results
+
+```{r, results = 'asis'}
+
+for(i in 1:length(top_modules)){
+  df = enrichment$enrichmentTable %>% filter(class==top_modules[i] & grepl('BioSystems.REACTOME',dataSetID) & Bonferroni<0.05) %>% 
+        dplyr::select(dataSetID, shortDataSetName, inGroups, Bonferroni, FDR, enrichmentRatio, effectiveClassSize, effectiveSetSize, nCommonGenes) %>%
+        arrange(Bonferroni, desc(enrichmentRatio))
+  if(nrow(df)>0){
+    print(kable(df, caption = paste0('Enriched terms for module ', top_modules[i], ' (SFARI Genes = ',
+                                    round(SFARI_genes_by_module$perc[SFARI_genes_by_module$Module==top_modules[i]][1],4), '%)')))
+    cat('\n') 
+  } else cat(paste0('\nNo enrichment found for module ',top_modules[i],'\n'))
+}
+
+rm(i, df)
+```
+<br>
+
+### GO Results
+
+```{r, results = 'asis'}
+
+for(i in 1:length(top_modules)){
+  df = enrichment$enrichmentTable %>% filter(class==top_modules[i] & grepl('GO',dataSetID) & Bonferroni<0.05) %>% 
+        dplyr::select(dataSetID, shortDataSetName, inGroups, Bonferroni, FDR, enrichmentRatio, effectiveClassSize, effectiveSetSize, nCommonGenes) %>%
+        arrange(Bonferroni, desc(enrichmentRatio))
+  if(nrow(df)>0){
+    print(kable(df, caption = paste0('Enriched terms for module ', top_modules[i], ' (SFARI Genes = ',
+                                    round(SFARI_genes_by_module$perc[SFARI_genes_by_module$Module==top_modules[i]][1],4), '%)')))
+    cat('\n') 
+  } else cat(paste0('\nNo enrichment found for module ',top_modules[i],'\n'))
+}
+
+rm(i, df)
+```
+<br>
+
+### Internal Collection Results
+
+```{r, results = 'asis'}
+
+for(i in 1:length(top_modules)){
+  df = enrichment$enrichmentTable %>% filter(class==top_modules[i] & !grepl('GO',dataSetID) & !grepl('BioSystems',dataSetID) & Bonferroni<0.05) %>% 
+        dplyr::select(dataSetID, shortDataSetName, inGroups, Bonferroni, FDR, enrichmentRatio, effectiveClassSize, effectiveSetSize, nCommonGenes) %>%
+        arrange(Bonferroni, desc(enrichmentRatio))
+  if(nrow(df)>0){
+    print(kable(df, caption = paste0('Enriched terms for module ', top_modules[i], ' (SFARI Genes = ',
+                                    round(SFARI_genes_by_module$perc[SFARI_genes_by_module$Module==top_modules[i]][1],4), '%)')))
+    cat('\n') 
+  } else cat(paste0('\nNo enrichment found for module ',top_modules[i],'\n'))
+}
+
+rm(i, df)
+```
+<br>
