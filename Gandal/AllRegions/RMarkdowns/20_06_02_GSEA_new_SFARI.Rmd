@@ -12,7 +12,7 @@ library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; libra
 library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally)
 library(knitr)
 library(biomaRt)
-library(clusterProfiler) ; library(ReactomePA) ; library(DOSE)
+library(clusterProfiler) ; library(ReactomePA) ; library(DOSE) ; library(org.Hs.eg.db)
 
 ```
 
@@ -85,7 +85,7 @@ Using the package clusterProfiler. Performing Gene Set Enrichment Analysis using
 
 - REACTOME
 
-```{r, warning=FALSE, message=FALSE}
+```{r GSEA, warning=FALSE, message=FALSE}
 file_name = './../Data/GSEA_bonferroni.RData'
 
 if(file.exists(file_name)){
@@ -94,22 +94,29 @@ if(file.exists(file_name)){
   
   ##############################################################################
   # PREPARE DATASET
+  
   # Create dataset with top modules membership and removing the genes without an assigned module
-  EA_dataset = data.frame('ensembl_gene_id' = genes_info$ID, module = genes_info$Module)  %>% filter(genes_info$Module!='gray')
+  EA_dataset = data.frame('ensembl_gene_id' = genes_info$ID, module = genes_info$Module)  %>% 
+               filter(genes_info$Module!='gray')
   
   # Assign Entrez Gene Id to each gene
   getinfo = c('ensembl_gene_id','entrezgene')
-  mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl', host='feb2014.archive.ensembl.org')
-  biomart_output = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=genes_info$ID[genes_info$Module!='gray'], mart=mart)
+  mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl', 
+                 host='feb2014.archive.ensembl.org')
+  biomart_output = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), 
+                         values=genes_info$ID[genes_info$Module!='gray'], mart=mart)
   
-  EA_dataset = biomart_output %>% dplyr::rename('ID' = ensembl_gene_id) %>% left_join(dataset %>% dplyr::select(ID, contains('MM.')), by='ID')
+  EA_dataset = biomart_output %>% dplyr::rename('ID' = ensembl_gene_id) %>%
+               left_join(dataset %>% dplyr::select(ID, contains('MM.')), by='ID')
 
   
   ##############################################################################
   # PERFORM ENRICHMENT
+  
   # Following https://yulab-smu.github.io/clusterProfiler-book/chapter8.html
   
   modules = dataset$Module[dataset$Module!='gray'] %>% as.character %>% table %>% names
+  nPerm = 1e5 # 100 times more than the default
   
   enrichment_GO = list()         # Gene Ontology
   enrichment_DO = list()         # Disease Ontology
@@ -117,70 +124,117 @@ if(file.exists(file_name)){
   enrichment_KEGG = list()       # Kyoto Encyclopedia of Genes and Genomes
   enrichment_Reactome = list()   # Reactome: Pathway db
   
+  
   for(module in modules){
     geneList = EA_dataset[,paste0('MM.',substring(module,2))]
     names(geneList) = EA_dataset[,'entrezgene'] %>% as.character
     geneList = sort(geneList, decreasing = TRUE)
     
-    enrichment_GO[[module]] = gseGO(geneList, OrgDb = org.Hs.eg.db, pAdjustMethod = 'bonferroni', verbose = FALSE, seed = TRUE) %>% data.frame
-    enrichment_DO[[module]] = gseDO(geneList, pAdjustMethod = 'bonferroni', verbose = FALSE, seed = TRUE) %>% data.frame
-    enrichment_DGN[[module]] = gseDGN(geneList, pAdjustMethod = 'bonferroni', verbose = FALSE, seed = TRUE) %>% data.frame
-    enrichment_KEGG[[module]] = gseKEGG(geneList, organism = 'human', pAdjustMethod = 'bonferroni', verbose = FALSE, seed = TRUE) %>% data.frame
-    enrichment_Reactome[[module]] = gsePathway(geneList, organism = 'human', pAdjustMethod = 'bonferroni', verbose = FALSE, seed = TRUE) %>% data.frame
+    enrichment_GO[[module]] = gseGO(geneList, OrgDb = org.Hs.eg.db, pAdjustMethod = 'bonferroni', 
+                                    nPerm = nPerm, verbose = FALSE, seed = TRUE) %>% data.frame
+    enrichment_DO[[module]] = gseDO(geneList, pAdjustMethod = 'bonferroni', 
+                                    nPerm = nPerm, verbose = FALSE, seed = TRUE) %>% data.frame
+    enrichment_DGN[[module]] = gseDGN(geneList, pAdjustMethod = 'bonferroni', 
+                                      nPerm = nPerm, verbose = FALSE, seed = TRUE) %>% data.frame
+    enrichment_KEGG[[module]] = gseKEGG(geneList, organism = 'human', pAdjustMethod = 'bonferroni', 
+                                        nPerm = nPerm, verbose = FALSE, seed = TRUE) %>% data.frame
+    enrichment_Reactome[[module]] = gsePathway(geneList, organism = 'human', pAdjustMethod = 'bonferroni', 
+                                               nPerm = nPerm, verbose = FALSE, seed = TRUE) %>% data.frame
   }
-
-  # Save enrichment results
+  
+  # Temporal save, just in case SFARI Genes enrichment fails
   save(enrichment_GO, enrichment_DO, enrichment_DGN, enrichment_KEGG, enrichment_Reactome, file=file_name)
   
-  rm(getinfo, mart, biomart_output, gene, module)
+  
+  ##############################################################################
+  # PERFROM ENRICHMENT FOR SFARI GENES
+  
+  # BUILD MAPPING BETWEEN GENES AND SFARI
+
+  # Build TERM2GENE: dataframe of 2 columns with term and gene
+  term2gene = biomart_output %>% 
+              left_join(genes_info %>% dplyr::select(ID, `gene-score`), 
+                         by = c('ensembl_gene_id'='ID')) %>% filter(`gene-score`!='Others') %>%
+              dplyr::select(-ensembl_gene_id) %>% 
+              mutate('SFARI' = 'SFARI', `gene-score` = paste0('SFARI Score ',`gene-score`)) %>%
+              melt(id.vars = 'entrezgene') %>% dplyr::select(value, entrezgene) %>% 
+              dplyr::rename('term' = value, 'gene' = entrezgene) %>% distinct
+  
+  
+  # PERFORM GSEA
+  enrichment_SFARI = list()
+  
+  for(module in modules){
+      geneList = EA_dataset[,paste0('MM.',substring(module,2))]
+      names(geneList) = EA_dataset[,'entrezgene'] %>% as.character
+      geneList = sort(geneList, decreasing = TRUE)
+      
+      enrichment_SFARI[[module]] = clusterProfiler::GSEA(geneList, pAdjustMethod = 'bonferroni',  nPerm = nPerm,
+                                                         TERM2GENE = term2gene, pvalueCutoff = 1, maxGSSize=1000,
+                                                          verbose = FALSE, seed = TRUE) %>% data.frame
+  }
+
+  ##############################################################################
+  # Save enrichment results
+  save(enrichment_GO, enrichment_DO, enrichment_DGN, enrichment_KEGG, enrichment_Reactome, 
+       enrichment_SFARI, file=file_name)
+  
+  rm(getinfo, mart, biomart_output, gene, module, term2gene, geneList, EA_dataset)
 }
 
 ```
 <br>
 
-### GSEA for SFARI Genes
+<!-- ### GSEA for SFARI Genes -->
 
-```{r, warning=FALSE, message=FALSE}
+<!-- ```{r, warning=FALSE, message=FALSE} -->
 
-# PREPARE DATASET
+<!-- # PREPARE DATASET -->
 
-# Create dataset with top modules membership and removing the genes without an assigned module
-EA_dataset = data.frame('ensembl_gene_id' = genes_info$ID, module = genes_info$Module)  %>% filter(genes_info$Module!='gray')
+<!-- # Create dataset with top modules membership and removing the genes without an assigned module -->
+<!-- EA_dataset = data.frame('ensembl_gene_id' = genes_info$ID, module = genes_info$Module)  %>%  -->
+<!--              filter(genes_info$Module!='gray') -->
 
-# Assign Entrez Gene Id to each gene
-getinfo = c('ensembl_gene_id','entrezgene')
-mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl', host='feb2014.archive.ensembl.org')
-biomart_output = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=genes_info$ID, mart=mart)
+<!-- # Assign Entrez Gene Id to each gene -->
+<!-- getinfo = c('ensembl_gene_id','entrezgene') -->
+<!-- mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl',  -->
+<!--                host='feb2014.archive.ensembl.org') -->
+<!-- biomart_output = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=genes_info$ID, mart=mart) -->
 
-EA_dataset = biomart_output %>% dplyr::rename('ID' = ensembl_gene_id) %>% left_join(dataset %>% dplyr::select(ID, Module, contains('MM.')), by='ID') %>%
-             filter(Module != 'gray') %>% dplyr::select(-Module)
-
-
-
-# BUILD MAPPING BETWEEN GENES AND SFARI
-
-# Build TERM2GENE: dataframe of 2 columns with term and gene
-term2gene = biomart_output %>% left_join(genes_info %>% dplyr::select(ID, `gene-score`), by = c('ensembl_gene_id'='ID')) %>% filter(`gene-score`!='Others') %>%
-            dplyr::select(-ensembl_gene_id) %>% mutate('SFARI' = 'SFARI', `gene-score` = paste0('SFARI Score ',`gene-score`)) %>%
-            melt(id.vars = 'entrezgene') %>% dplyr::select(value, entrezgene) %>% dplyr::rename('term' = value, 'gene' = entrezgene) %>% distinct
+<!-- EA_dataset = biomart_output %>% dplyr::rename('ID' = ensembl_gene_id) %>%  -->
+<!--              left_join(dataset %>% dplyr::select(ID, Module, contains('MM.')), by='ID') %>% -->
+<!--              filter(Module != 'gray') %>% dplyr::select(-Module) -->
 
 
-# PERFORM GSEA
 
-modules = dataset$Module[dataset$Module!='gray'] %>% as.character %>% table %>% names
-enrichment_SFARI = list()
+<!-- # BUILD MAPPING BETWEEN GENES AND SFARI -->
 
-for(module in modules){
-    geneList = EA_dataset[,paste0('MM.',substring(module,2))]
-    names(geneList) = EA_dataset[,'entrezgene'] %>% as.character
-    geneList = sort(geneList, decreasing = TRUE)
-    
-    enrichment_SFARI[[module]] = clusterProfiler::GSEA(geneList, pAdjustMethod = 'bonferroni', TERM2GENE = term2gene, pvalueCutoff = 1, maxGSSize = 1000,
-                                                      verbose = FALSE, seed = TRUE) %>% data.frame
-}
+<!-- # Build TERM2GENE: dataframe of 2 columns with term and gene -->
+<!-- term2gene = biomart_output %>% left_join(genes_info %>% dplyr::select(ID, `gene-score`),  -->
+<!--                                          by = c('ensembl_gene_id'='ID')) %>% filter(`gene-score`!='Others') %>% -->
+<!--             dplyr::select(-ensembl_gene_id) %>% mutate('SFARI' = 'SFARI',  -->
+<!--                                                        `gene-score` = paste0('SFARI Score ',`gene-score`)) %>% -->
+<!--             melt(id.vars = 'entrezgene') %>% dplyr::select(value, entrezgene) %>%  -->
+<!--             dplyr::rename('term' = value, 'gene' = entrezgene) %>% distinct -->
 
-rm(getinfo, values, mart, biomart_output, term2gene, modules, module, geneList, EA_dataset)
-```
+
+<!-- # PERFORM GSEA -->
+
+<!-- modules = dataset$Module[dataset$Module!='gray'] %>% as.character %>% table %>% names -->
+<!-- enrichment_SFARI = list() -->
+
+<!-- for(module in modules_){ -->
+<!--     geneList = EA_dataset[,paste0('MM.',substring(module,2))] -->
+<!--     names(geneList) = EA_dataset[,'entrezgene'] %>% as.character -->
+<!--     geneList = sort(geneList, decreasing = TRUE) -->
+
+<!--     enrichment_SFARI[[module]] = clusterProfiler::GSEA(geneList, pAdjustMethod = 'bonferroni',  nPerm = nPerm, -->
+<!--                                                        TERM2GENE = term2gene, pvalueCutoff = 1, maxGSSize=1000, -->
+<!--                                                         verbose = FALSE, seed = TRUE) %>% data.frame -->
+<!-- } -->
+
+<!-- rm(getinfo, values, mart, biomart_output, term2gene, modules, module, geneList, EA_dataset) -->
+<!-- ``` -->
 <br>
 
 ### Enrichment in SFARI Genes by Module
@@ -262,141 +316,4 @@ p = plot_data %>% filter(Module == modules[1]) %>% ggplot(aes(Module, value, col
 ggExtra::ggMarginal(p, type = 'density', groupColour = TRUE, groupFill = TRUE, margins = 'x')
 
 ```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-<!-- ## Calculate the Enrichment of SFARI Genes in Modules -->
-<!-- <br> -->
-
-<!-- This is explained in 20_05_22_WGCNA_top_SFARI_modules.html -->
-
-<!-- ```{r warning=FALSE, message=FALSE} -->
-<!-- SFARI_genes_by_module = dataset %>% mutate('hasSFARIscore' = !gene.score %in% c('Others', 'Neuronal')) %>%  -->
-<!--                         group_by(Module, MTcor, hasSFARIscore) %>% summarise(s=n()) %>%  -->
-<!--                         left_join(dataset %>% group_by(Module) %>% summarise(n=n()), by='Module') %>%  -->
-<!--                         mutate(perc=round(s/n*100,2)) %>% filter(hasSFARIscore & Module != 'gray') %>% arrange(desc(perc)) %>% ungroup -->
-
-<!-- N = sum(SFARI_genes_by_module$n) -->
-<!-- S = sum(SFARI_genes_by_module$s) -->
-
-<!-- calc_prob = function(row, log.p, S){ -->
-<!--   s = row[4] %>% as.numeric -->
-<!--   n = row[5] %>% as.numeric -->
-<!--   prob = phyper(s, S, N-S, n, log.p = log.p, lower.tail=FALSE) -->
-<!--   return(prob) -->
-<!-- } -->
-
-<!-- SFARI_genes_by_module$prob = apply(SFARI_genes_by_module, 1, function(x) calc_prob(x, FALSE, S)) -->
-<!-- SFARI_genes_by_module$adj_prob = p.adjust(SFARI_genes_by_module$prob, method = 'bonferroni') -->
-<!-- SFARI_genes_by_module = SFARI_genes_by_module %>% arrange(prob) -->
-
-<!-- ggplotly(SFARI_genes_by_module %>% ggplot(aes(MTcor, prob, size=n)) + geom_point(color=SFARI_genes_by_module$Module, alpha=0.5, aes(id=Module)) +  -->
-<!--          geom_smooth(color='#cccccc', size = 0.5, se=FALSE) + xlab('Module-Diagnosis Correlation') + ylab('Probability') +  -->
-<!--          ggtitle(paste0('Corr = ', round(cor(SFARI_genes_by_module$MTcor, SFARI_genes_by_module$prob),2), ': Corr[Module-ASD corr<0] = ',  -->
-<!--                         round(cor(SFARI_genes_by_module$MTcor[SFARI_genes_by_module$MTcor<0], SFARI_genes_by_module$prob[SFARI_genes_by_module$MTcor<0]),3), -->
-<!--                         ' Corr[Module-ASD corr>0] = ', -->
-<!--                         round(cor(SFARI_genes_by_module$MTcor[SFARI_genes_by_module$MTcor>=0], SFARI_genes_by_module$prob[SFARI_genes_by_module$MTcor>=0]),2))) + -->
-<!--          theme_minimal() + theme(legend.position = 'none')) -->
-
-<!-- ``` -->
-
-<!-- <br><br> -->
-
-<!-- ### Selecting Top Modules Enriched in SFARI Genes -->
-<!-- <br> -->
-
-<!-- We can interpet the probability we obtain as a p-value (and correct it for multiple testing), we can use it as a threshold to identify modules with a significantly high percentage of SFARI genes (adjusted p-value < 0.01) -->
-
-<!-- Using log-scale to help us differentiate between small differences close to zero better -->
-
-<!-- ```{r warning=FALSE, message=FALSE} -->
-
-<!-- ggplotly(SFARI_genes_by_module %>% ggplot(aes(MTcor, adj_prob, size=n)) + geom_point(color=SFARI_genes_by_module$Module, alpha=0.5, aes(id=Module)) + -->
-<!--          geom_hline(yintercept = 0.05, color = 'gray', linetype = 'dotted') + xlab('Module-Diagnosis Correlation') + ylab('Corrected p-values') + scale_y_log10() + -->
-<!--          theme_minimal() + theme(legend.position = 'none')) -->
-
-<!-- top_modules = SFARI_genes_by_module$Module[SFARI_genes_by_module$adj_prob <0.05] -->
-
-<!-- cat(paste0('Keeping top ', length(top_modules),' modules: ', paste(top_modules, collapse = ', '))) -->
-
-<!-- rm(N,S,calc_prob) -->
-<!-- ``` -->
-
-<!-- <br> -->
-
-
-
-<!-- ### Reactome Results -->
-
-<!-- ```{r, results = 'asis'} -->
-
-<!-- for(i in 1:length(top_modules)){ -->
-<!--   df = enrichment$enrichmentTable %>% filter(class==top_modules[i] & grepl('BioSystems.REACTOME',dataSetID) & Bonferroni<0.05) %>%  -->
-<!--         dplyr::select(dataSetID, shortDataSetName, inGroups, Bonferroni, FDR, enrichmentRatio, effectiveClassSize, effectiveSetSize, nCommonGenes) %>% -->
-<!--         arrange(Bonferroni, desc(enrichmentRatio)) -->
-<!--   if(nrow(df)>0){ -->
-<!--     print(kable(df, caption = paste0('Enriched terms for module ', top_modules[i], ' (SFARI Genes = ', -->
-<!--                                     round(SFARI_genes_by_module$perc[SFARI_genes_by_module$Module==top_modules[i]][1],4), '%)'))) -->
-<!--     cat('\n')  -->
-<!--   } else cat(paste0('\nNo enrichment found for module ',top_modules[i],'\n')) -->
-<!-- } -->
-
-<!-- rm(i, df) -->
-<!-- ``` -->
-<!-- <br> -->
-
-<!-- ### GO Results -->
-
-<!-- ```{r, results = 'asis'} -->
-
-<!-- for(i in 1:length(top_modules)){ -->
-<!--   df = enrichment$enrichmentTable %>% filter(class==top_modules[i] & grepl('GO',dataSetID) & Bonferroni<0.05) %>%  -->
-<!--         dplyr::select(dataSetID, shortDataSetName, inGroups, Bonferroni, FDR, enrichmentRatio, effectiveClassSize, effectiveSetSize, nCommonGenes) %>% -->
-<!--         arrange(Bonferroni, desc(enrichmentRatio)) -->
-<!--   if(nrow(df)>0){ -->
-<!--     print(kable(df, caption = paste0('Enriched terms for module ', top_modules[i], ' (SFARI Genes = ', -->
-<!--                                     round(SFARI_genes_by_module$perc[SFARI_genes_by_module$Module==top_modules[i]][1],4), '%)'))) -->
-<!--     cat('\n')  -->
-<!--   } else cat(paste0('\nNo enrichment found for module ',top_modules[i],'\n')) -->
-<!-- } -->
-
-<!-- rm(i, df) -->
-<!-- ``` -->
-<!-- <br> -->
-
-<!-- ### Internal Collection Results -->
-
-<!-- ```{r, results = 'asis'} -->
-
-<!-- for(i in 1:length(top_modules)){ -->
-<!--   df = enrichment$enrichmentTable %>% filter(class==top_modules[i] & !grepl('GO',dataSetID) & !grepl('BioSystems',dataSetID) & Bonferroni<0.05) %>%  -->
-<!--         dplyr::select(dataSetID, shortDataSetName, inGroups, Bonferroni, FDR, enrichmentRatio, effectiveClassSize, effectiveSetSize, nCommonGenes) %>% -->
-<!--         arrange(Bonferroni, desc(enrichmentRatio)) -->
-<!--   if(nrow(df)>0){ -->
-<!--     print(kable(df, caption = paste0('Enriched terms for module ', top_modules[i], ' (SFARI Genes = ', -->
-<!--                                     round(SFARI_genes_by_module$perc[SFARI_genes_by_module$Module==top_modules[i]][1],4), '%)'))) -->
-<!--     cat('\n')  -->
-<!--   } else cat(paste0('\nNo enrichment found for module ',top_modules[i],'\n')) -->
-<!-- } -->
-
-<!-- rm(i, df) -->
-<!-- ``` -->
-<!-- <br> -->
+<br>

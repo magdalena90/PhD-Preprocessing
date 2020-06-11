@@ -115,7 +115,8 @@ If we interpret the number of genes ($n$) in a module as $n$ random draws withou
 SFARI_genes_by_module = dataset %>% mutate('hasSFARIscore' = !gene.score %in% c('Others', 'Neuronal')) %>% 
                         group_by(Module, MTcor, hasSFARIscore) %>% summarise(s=n()) %>% 
                         left_join(dataset %>% group_by(Module) %>% summarise(n=n()), by='Module') %>% 
-                        mutate(perc=round(s/n*100,2)) %>% filter(hasSFARIscore & Module != 'gray') %>% arrange(desc(perc)) %>% ungroup
+                        mutate(perc=round(s/n*100,2)) %>% filter(hasSFARIscore & Module != 'gray') %>% 
+                        arrange(desc(perc)) %>% ungroup
 
 N = sum(SFARI_genes_by_module$n)
 S = sum(SFARI_genes_by_module$s)
@@ -131,12 +132,18 @@ SFARI_genes_by_module$prob = apply(SFARI_genes_by_module, 1, function(x) calc_pr
 SFARI_genes_by_module$adj_prob = p.adjust(SFARI_genes_by_module$prob, method = 'bonferroni')
 SFARI_genes_by_module = SFARI_genes_by_module %>% arrange(prob)
 
-ggplotly(SFARI_genes_by_module %>% ggplot(aes(MTcor, prob, size=n)) + geom_point(color=SFARI_genes_by_module$Module, alpha=0.5, aes(id=Module)) + 
-         geom_smooth(color='#cccccc', size = 0.5, se=FALSE) + xlab('Module-Diagnosis Correlation') + ylab('Probability') + 
-         ggtitle(paste0('Corr = ', round(cor(SFARI_genes_by_module$MTcor, SFARI_genes_by_module$prob),2), ': Corr[Module-ASD corr<0] = ', 
-                        round(cor(SFARI_genes_by_module$MTcor[SFARI_genes_by_module$MTcor<0], SFARI_genes_by_module$prob[SFARI_genes_by_module$MTcor<0]),3),
+ggplotly(SFARI_genes_by_module %>% ggplot(aes(MTcor, prob, size=n)) + 
+         geom_point(color=SFARI_genes_by_module$Module, alpha=0.5, aes(id=Module)) + 
+         geom_smooth(color='#cccccc', size = 0.5, se=FALSE) + xlab('Module-Diagnosis Correlation') + 
+         ylab('SFARI Genes Over Representation p-value') + 
+         ggtitle(paste0('\nRelation between enrichment in ASD and SFARI Genes by Module\n\nCorr = ', 
+                        round(cor(SFARI_genes_by_module$MTcor, SFARI_genes_by_module$prob),2),
+                        ': Corr[Module-ASD corr<0] = ', 
+                        round(cor(SFARI_genes_by_module$MTcor[SFARI_genes_by_module$MTcor<0], 
+                                  SFARI_genes_by_module$prob[SFARI_genes_by_module$MTcor<0]),3),
                         ' Corr[Module-ASD corr>0] = ',
-                        round(cor(SFARI_genes_by_module$MTcor[SFARI_genes_by_module$MTcor>=0], SFARI_genes_by_module$prob[SFARI_genes_by_module$MTcor>=0]),2))) +
+                        round(cor(SFARI_genes_by_module$MTcor[SFARI_genes_by_module$MTcor>=0], 
+                                  SFARI_genes_by_module$prob[SFARI_genes_by_module$MTcor>=0]),2))) +
          theme_minimal() + theme(legend.position = 'none'))
 
 ```

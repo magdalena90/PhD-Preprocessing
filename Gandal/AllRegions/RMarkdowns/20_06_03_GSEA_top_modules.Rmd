@@ -62,7 +62,7 @@ dataset$Module = dataset[,clustering_selected]
 dataset$gene.score = genes_info$gene.score
 
 # GSEA Results
-load('./../Data/GSEA.RData')
+load('./../Data/GSEA_bonferroni.RData')
 
 
 SFARI_colour_hue = function(r) {

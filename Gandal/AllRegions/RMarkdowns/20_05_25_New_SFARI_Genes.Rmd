@@ -6,6 +6,8 @@ output:
 ---
 
 ```{r load_packages, echo=TRUE, warning=FALSE, message=FALSE}
+# !diagnostics off
+
 #setwd('/afs/inf.ed.ac.uk/user/s17/s1725186/Documents/PhD-Models/FirstPUModel/RMarkdowns')
 
 library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(plotlyutils)
@@ -24,7 +26,7 @@ load('./../Data/preprocessed_data.RData')
 datExpr = datExpr %>% data.frame
 genes_info = DE_info %>% data.frame
 
-# GO Neuronal annotations: regex 'neuron' in GO functional annotations and label the genes that make a match as neuronal
+# GO Neuronal annotations: regex 'neuron' in GO functional annotations and label the genes that make a match
 GO_annotations = read.csv('./../Data/genes_GO_annotations.csv')
 GO_neuronal = GO_annotations %>% filter(grepl('neuron', go_term)) %>% 
               mutate('ID'=as.character(ensembl_gene_id)) %>% 
@@ -40,8 +42,10 @@ genes_info = genes_info %>% mutate('ID'=rownames(.)) %>% left_join(SFARI_genes, 
   mutate(`gene-score`=ifelse(is.na(`gene-score`), 'Others', `gene-score`)) %>%
   distinct(ID, .keep_all = TRUE) %>% left_join(GO_neuronal, by='ID') %>%
   mutate(Neuronal=ifelse(is.na(Neuronal), 0, Neuronal)) %>%
-  mutate(gene.score=ifelse(`gene-score`=='Others' & Neuronal==1, 'Neuronal', `gene-score`), significant=padj<0.05 & !is.na(padj)) %>%
-  mutate(Group = factor(ifelse(gene.score %in% c('Neuronal','Others'), gene.score, 'SFARI'), levels = c('SFARI', 'Neuronal', 'Others')))
+  mutate(gene.score=ifelse(`gene-score`=='Others' & Neuronal==1, 'Neuronal', `gene-score`), 
+         significant=padj<0.05 & !is.na(padj)) %>%
+  mutate(Group = factor(ifelse(gene.score %in% c('Neuronal','Others'), gene.score, 'SFARI'), 
+                        levels = c('SFARI', 'Neuronal', 'Others')))
 
 
 SFARI_colour_hue = function(r) {
@@ -88,7 +92,7 @@ cat(paste0('There are ', sum(is.na(SFARI_genes$`gene-score`)) ,
 <br>
 
 ```{r}
-cat(paste0('There are ', sum(SFARI_genes$ID %in% rownames(datExpr)), ' SFARI Genes in the expression dataset (~',
+cat(paste0('There are ',sum(SFARI_genes$ID %in% rownames(datExpr)),' SFARI Genes in the expression dataset (~',
              round(100*mean(SFARI_genes$ID %in% rownames(datExpr))),'%)'))
 
 cat(paste0('Of these, only ', sum(genes_info$`gene-score`!='Others'), ' have an assigned score'))
@@ -140,8 +144,9 @@ Larger mean expression than the other two groups, smaller SD than Neuronal genes
 
 ```{r, warning=FALSE, fig.width=10}
 plot_data = data.frame('ID'=rownames(datExpr), 'MeanExpr'=rowMeans(datExpr), 'SDExpr'=apply(datExpr,1,sd)) %>% 
-            left_join(genes_info, by='ID') %>% mutate(Group = factor(ifelse(gene.score %in% c('Neuronal','Others'), gene.score, 'SFARI'), 
-                                                                  levels = c('SFARI', 'Neuronal', 'Others')))
+            left_join(genes_info, by='ID') %>%
+            mutate(Group = factor(ifelse(gene.score %in% c('Neuronal','Others'), gene.score, 'SFARI'), 
+                                  levels = c('SFARI', 'Neuronal', 'Others')))
 
 p1 = ggplotly(plot_data %>% ggplot(aes(Group, MeanExpr, fill=Group)) + geom_boxplot() + 
               scale_fill_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(8,7)))) + theme_minimal() +
@@ -157,19 +162,25 @@ plotly::subplot(p1, p2, nrows=1)
 
 ```{r, fig.width=10, fig.height=4}
 
-p1 = plot_data %>% ggplot(aes(Group, MeanExpr, color = Group)) + stat_summary(fun = mean, geom = 'point', size = 3) +
+p1 = plot_data %>% ggplot(aes(Group, MeanExpr, color = Group)) + 
+                   stat_summary(fun = mean, geom = 'point', size = 3) +
                    stat_summary(fun.data = mean_sd, geom = 'errorbar', width = 0.5) +
-                   stat_compare_means(comparisons = list(c('SFARI','Neuronal'), c('SFARI','Others')), label = 'p.signif',
-                                      method = 't.test', method.args = list(var.equal = FALSE), label.y = c(12,13)) +
-                   scale_colour_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(8,7)))) +xlab('') + ylab('Mean Level of Expression') +
-                   ggtitle('Mean Expression') + theme_minimal() + theme(legend.position = 'none')
+                   stat_compare_means(comparisons = list(c('SFARI','Neuronal'), c('SFARI','Others')), 
+                                      label = 'p.signif', method = 't.test',
+                                      method.args = list(var.equal = FALSE), label.y = c(12,13)) +
+                   scale_colour_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(8,7)))) + xlab('') + 
+                   ylab('Mean Level of Expression') + ggtitle('Mean Expression') + theme_minimal() + 
+                   theme(legend.position = 'none')
 
-p2 = plot_data %>% ggplot(aes(Group, SDExpr, color = Group)) + stat_summary(fun = mean, geom = 'point', size = 3) +
+p2 = plot_data %>% ggplot(aes(Group, SDExpr, color = Group)) + 
+                   stat_summary(fun = mean, geom = 'point', size = 3) +
                    stat_summary(fun.data = mean_sd, geom = 'errorbar', width = 0.5) +
-                   stat_compare_means(comparisons = list(c('SFARI','Neuronal'), c('SFARI','Others')), label = 'p.signif',
-                                      method = 't.test', method.args = list(var.equal = FALSE), label.y = c(0.35, 0.4)) +
-                   scale_colour_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(8,7)))) + xlab('') + ylab('SD of Level of Expression') +
-                   ggtitle('Standard Deviation') + theme_minimal() + theme(legend.position = 'none')
+                   stat_compare_means(comparisons = list(c('SFARI','Neuronal'), c('SFARI','Others')), 
+                                      label = 'p.signif', method = 't.test', 
+                                      method.args = list(var.equal = FALSE), label.y = c(0.35, 0.4)) +
+                   scale_colour_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(8,7)))) + xlab('') + 
+                   ylab('SD of Level of Expression') + ggtitle('Standard Deviation') + theme_minimal() + 
+                   theme(legend.position = 'none')
 
 
 grid.arrange(p1, p2, nrow=1, top = 'Comparison Between SFARI Genes and the rest of the dataset')
@@ -186,49 +197,61 @@ rm(plot_data, p1, p2)
 Proportion of over- and under-expressed genes is very similar between groups: approximately half
 
 ```{r, warning=FALSE, message=FALSE}
-genes_info %>% mutate(direction = ifelse(log2FoldChange>0, 'over-expressed', 'under-expressed')) %>% group_by(Group, direction) %>% tally(name = 'over_expr') %>% 
-            filter(direction == 'over-expressed') %>% ungroup %>% left_join(genes_info %>% group_by(Group) %>% tally(name = 'Total'), by = 'Group') %>% ungroup %>%
-            mutate('prop_over_expr' = round(over_expr/Total,3)) %>% dplyr::select(-direction) %>% kable
+genes_info %>% mutate(direction = ifelse(log2FoldChange>0, 'over-expressed', 'under-expressed')) %>% 
+               group_by(Group, direction) %>% tally(name = 'over_expr') %>% 
+               filter(direction == 'over-expressed') %>% ungroup %>% 
+               left_join(genes_info %>% group_by(Group) %>% tally(name = 'Total'), by = 'Group') %>% ungroup %>%
+               mutate('prop_over_expr' = round(over_expr/Total,3)) %>% dplyr::select(-direction) %>% kable
 ```
 
 Smaller lFC magnitude than Neuronal genes and similar but slightly lower than the rest of the genes
 
 ```{r}
 ggplotly(genes_info %>% ggplot(aes(x=Group, y=abs(log2FoldChange), fill=Group)) + geom_boxplot() + 
-         scale_fill_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(8,7)))) + ylab('logFoldChange Magnitude') + xlab('Group') + theme_minimal() +
-         theme(legend.position='none'))
+         scale_fill_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(8,7)))) + ylab('logFoldChange Magnitude') + 
+         xlab('Group') + theme_minimal() + theme(legend.position='none'))
 ```
 
 ```{r}
-genes_info %>% ggplot(aes(Group, abs(log2FoldChange), color = Group)) + stat_summary(fun = mean, geom = 'point', size = 3) +
-                   stat_summary(fun.data = function(x) return(data.frame('y' = mean(x), 'ymin' = max(mean(x)-sd(x),0), 'ymax' = mean(x)+sd(x))), 
-                                geom = 'errorbar', width = 0.5) +
-                   stat_compare_means(comparisons = list(c('SFARI','Neuronal'), c('SFARI','Others')), label = 'p.signif',
-                                      method = 't.test', method.args = list(var.equal = FALSE), label.y = c(0.4,0.5)) +
-                   scale_colour_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(8,7)))) + xlab('') + ylab('LFC Magnitude') +
-                   theme_minimal() + theme(legend.position = 'none')
+
+truncated_sd = function(x) data.frame('y' = mean(x), 'ymin' = max(mean(x)-sd(x),0), 'ymax' = mean(x)+sd(x))
+
+genes_info %>% ggplot(aes(Group, abs(log2FoldChange), color = Group)) + 
+               stat_summary(fun = mean, geom = 'point', size = 3) + 
+               stat_summary(fun.data = function(x) truncated_sd(x), geom = 'errorbar', width = 0.5) +
+               stat_compare_means(comparisons = list(c('SFARI','Neuronal'), c('SFARI','Others')), 
+                                  label = 'p.signif', method = 't.test', method.args = list(var.equal = FALSE), 
+                                  label.y = c(0.4,0.5)) +
+               scale_colour_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(8,7)))) + xlab('') + 
+               ylab('LFC Magnitude') + theme_minimal() + theme(legend.position = 'none')
+
+rm(truncated_sd)
 ```
 
 - SFARI Genes, as a group, have less genes with high (positive) lFC than the rest of the genes in the dataset
 
 ```{r, warning=FALSE, message=FALSE}
 plot_data = genes_info  %>% dplyr::select(Group, log2FoldChange) %>%
-            mutate(quant = cut(log2FoldChange, breaks = quantile(log2FoldChange, probs = seq(0,1,0.05)) %>% as.vector, labels = FALSE),
-                   value_range = cut(log2FoldChange, breaks = quantile(log2FoldChange, probs = seq(0,1,0.05)) %>% as.vector)) %>% 
+            mutate(quant = cut(log2FoldChange, breaks = quantile(log2FoldChange, probs = seq(0,1,0.05)) %>% 
+                           as.vector, labels = FALSE),
+                   value_range = cut(log2FoldChange, breaks = quantile(log2FoldChange, probs=seq(0,1,0.05)) %>% 
+                                 as.vector)) %>% 
             filter(Group == 'SFARI') %>% group_by(quant, value_range) %>% tally %>% ungroup %>%
             left_join(genes_info  %>% dplyr::select(Group, log2FoldChange) %>%
-                      mutate(quant = cut(log2FoldChange, breaks = quantile(log2FoldChange, probs = seq(0,1,0.05)) %>% as.vector, labels = FALSE)) %>% 
+                      mutate(quant = cut(log2FoldChange, breaks = quantile(log2FoldChange,
+                                     probs = seq(0,1,0.05)) %>% as.vector, labels = FALSE)) %>% 
                       group_by(quant) %>% tally(name = 'tot') %>% ungroup) %>% mutate(p = 100*n/tot)
 
-ggplotly(plot_data %>% ggplot(aes(quant, p)) + geom_bar(stat = 'identity', fill = '#00A4F7', aes(id = value_range)) + geom_smooth(color = 'gray', alpha = 0.1) + 
+ggplotly(plot_data %>% ggplot(aes(quant, p)) + geom_smooth(color = 'gray', alpha = 0.1) + 
+         geom_bar(stat = 'identity', fill = '#00A4F7', aes(id = value_range)) + 
          geom_hline(yintercept = 100*mean(genes_info$Group == 'SFARI'), color = 'gray', linetype = 'dotted') +
          xlab('Log Fold Change Quantiles') + ylab('% of SFARI Genes in each Quantile') + ggtitle('
 Distribution of SFARI Genes in LFC Quantiles') + theme_minimal())
 
 cat('LFC values for each quantile:')
 
-quants = data.frame('Quantile' = 1:20, 'LFC Range' = cut(genes_info$log2FoldChange, breaks = quantile(genes_info$log2FoldChange, probs = seq(0,1,0.05)) %>% as.vector) %>%
-         table %>% names)
+quants = data.frame('Quantile' = 1:20, 'LFC Range' = cut(genes_info$log2FoldChange,
+         breaks = quantile(genes_info$log2FoldChange, probs = seq(0,1,0.05)) %>% as.vector) %>% table %>% names)
 
 quants %>% kable
 
@@ -245,8 +268,8 @@ Lower proportion of DE genes than genes with Neuronal annotation but higher than
 
 ```{r, warning=FALSE, message=FALSE}
 genes_info %>% group_by(Group, significant) %>% tally(name = 'DE') %>% filter(significant) %>% ungroup %>%
-            left_join(genes_info %>% group_by(Group) %>% tally(name = 'Total'), by = 'Group') %>% ungroup %>% mutate('prop_DE' = round(DE/Total,2)) %>% 
-            dplyr::select(-significant) %>% kable
+               left_join(genes_info %>% group_by(Group) %>% tally(name = 'Total'), by = 'Group') %>% ungroup %>%
+               mutate('prop_DE' = round(DE/Total,2)) %>% dplyr::select(-significant) %>% kable
 ```
 
 SFARI Genes have consistently a lower percentage of DE genes than the Genes with Neuronal annotations and a very similar level to the rest of the genes
@@ -269,8 +292,10 @@ lfc_counts_all = genes_info %>% filter(Group == 'SFARI') %>% tally %>%
 for(lfc in lfc_list){
   
   # Recalculate genes_info with the new threshold (p-values change)
-  DE_genes = results(dds, lfcThreshold=log2(lfc), altHypothesis='greaterAbs') %>% data.frame %>% mutate('ID'=rownames(.)) %>% 
-             left_join(genes_info %>% dplyr::select(ID, Neuronal, gene.score, Group), by = 'ID') %>% filter(padj<0.05 & abs(log2FoldChange)>log2(lfc))
+  DE_genes = results(dds, lfcThreshold=log2(lfc), altHypothesis='greaterAbs') %>% data.frame %>% 
+             mutate('ID' = rownames(.)) %>% 
+             left_join(genes_info %>% dplyr::select(ID, Neuronal, gene.score, Group), by = 'ID') %>% 
+             filter(padj<0.05 & abs(log2FoldChange)>log2(lfc))
 
   
   # Calculate counts by groups
@@ -303,9 +328,11 @@ lfc_counts_all = lfc_counts_all %>% filter(lfc!=-1) %>% #, group!='Others') %>%
 
 
 # Plot change of number of genes
-ggplotly(lfc_counts_all %>% filter(group != 'All') %>% mutate(group = factor(group, levels = c('SFARI', 'Neuronal', 'Others'))) %>%
+ggplotly(lfc_counts_all %>% filter(group != 'All') %>% 
+         mutate(group = factor(group, levels = c('SFARI', 'Neuronal', 'Others'))) %>%
          ggplot(aes(lfc, perc, color=group)) + geom_point(aes(id=n)) + geom_line() +
-         scale_color_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(8,7)))) + ylab('% of Differentially Expressed Genes') +  xlab('Fold Change') +
+         scale_color_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(8,7)))) + 
+         ylab('% of Differentially Expressed Genes') +  xlab('Fold Change') +
          ggtitle('Effect of filtering thresholds in SFARI Genes') + theme_minimal())
 
 ```
@@ -345,16 +372,29 @@ p2 = ggplotly(plot_data %>% ggplot(aes(gene.score, SDExpr, fill=gene.score)) + g
 plotly::subplot(p1, p2, nrows=1)
 ```
 
-```{r}
-comparisons = list(c('1','Neuronal'), c('2','Neuronal'), c('3','Neuronal'), c('1','Others'), c('2','Others'), c('3','Others'),
-                   c('1','2'), c('2','3'), c('Neuronal', 'Others'))
+```{r, fig.width=10}
+comparisons = list(c('1','Neuronal'), c('2','Neuronal'), c('3','Neuronal'), c('1','Others'), c('2','Others'),
+                   c('3','Others'), c('1','2'), c('2','3'), c('Neuronal', 'Others'))
 
-plot_data %>% ggplot(aes(gene.score, MeanExpr, color = gene.score)) + 
-              stat_summary(fun.data = mean_sd, geom = 'errorbar', width = 0.5, color = '#999999') + stat_summary(fun = mean, geom = 'point', size = 3) + 
-              stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', method.args = list(var.equal = FALSE), 
-                                 label.y = c(13, 12.5, 12, 15, 14.5, 14, rep(16.5, 3)), tip.length = 0.02) +
-              scale_colour_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + xlab('') + ylab('Mean Expression') +
-              theme_minimal() + theme(legend.position = 'none')
+p1 = plot_data %>% ggplot(aes(gene.score, MeanExpr, color = gene.score)) + 
+     stat_summary(fun.data = mean_sd, geom = 'errorbar', width = 0.5, color = '#999999') + 
+     stat_summary(fun = mean, geom = 'point', size = 3) + 
+     stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
+                        method.args = list(var.equal = FALSE), 
+                        label.y = c(13, 12.5, 12, 15, 14.5, 14, rep(16.5, 3)), tip.length = 0.02) +
+     scale_colour_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + xlab('') + ylab('Mean Expression') +
+     ggtitle('Mean Expression') + theme_minimal() + theme(legend.position = 'none')
+
+p2 = plot_data %>% ggplot(aes(gene.score, SDExpr, color = gene.score)) + 
+     stat_summary(fun.data = mean_sd, geom = 'errorbar', width = 0.5, color = '#999999') + 
+     stat_summary(fun = mean, geom = 'point', size = 3) + 
+     stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
+                        method.args = list(var.equal = FALSE), 
+                        label.y = c(0.35, 0.325, 0.3, 0.425, 0.4, 0.375, rep(0.46, 3)), tip.length = 0.01) +
+     scale_colour_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + xlab('') + ylab('SD of Expression') +
+     ggtitle('Standard Deviation') + theme_minimal() + theme(legend.position = 'none')
+
+grid.arrange(p1, p2, nrow = 1)
 ```
 
 <br>
@@ -415,13 +455,15 @@ aux = genes_info %>% dplyr::select(ID, log2FoldChange, gene.score) %>%
       left_join(data.frame('ID' = rownames(datExpr), 'meanExpr' = rowMeans(datExpr)), by = 'ID') %>%
       dplyr::mutate(direction = ifelse(log2FoldChange>0, 'over-expressed', 'under-expressed'))
 
-plot_data = aux %>% group_by(gene.score, direction) %>% tally(name = 'p') %>% left_join(aux %>% group_by(gene.score) %>% tally, by = 'gene.score') %>%
-            mutate(p = p/n, y=1)
+plot_data = aux %>% group_by(gene.score, direction) %>% tally(name = 'p') %>%
+            left_join(aux %>% group_by(gene.score) %>% tally, by = 'gene.score') %>% mutate(p = p/n, y=1)
 
 
 plot_data %>% ggplot(aes(gene.score, p, fill=direction)) + geom_bar(stat='identity') + 
-              geom_hline(yintercept = mean(plot_data$p[plot_data$direction=='under-expressed']), linetype = 'dashed', color = 'white') + 
-              ylab('Percentage') + xlab('SFARI Gene Scores') + ggtitle('Direction of Fold-Change in genes by SFARI Score') + theme_minimal()
+              geom_hline(yintercept = mean(plot_data$p[plot_data$direction=='under-expressed']), 
+                         linetype = 'dashed', color = 'white') + 
+              ylab('Percentage') + xlab('SFARI Gene Scores') + 
+              ggtitle('Direction of Fold-Change in genes by SFARI Score') + theme_minimal()
 
 rm(aux)
 ```
@@ -442,18 +484,23 @@ On top of this, I believe this effect is made more extreme by the pattern found 
 
 ```{r}
 ggplotly(genes_info %>% ggplot(aes(x=gene.score, y=abs(log2FoldChange), fill=gene.score)) + 
-         geom_boxplot() + scale_fill_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + xlab('SFARI Gene scores') + ylab('log Fold Change Magnitude') +
-         theme_minimal() + theme(legend.position='none'))
+         geom_boxplot() + scale_fill_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + xlab('SFARI Gene scores') + 
+         ylab('log Fold Change Magnitude') + theme_minimal() + theme(legend.position='none'))
 ```
 
 ```{r}
+truncated_sd = function(x) data.frame('y' = mean(x), 'ymin' = max(mean(x)-sd(x),0), 'ymax' = mean(x)+sd(x))
+
 genes_info %>% ggplot(aes(gene.score, abs(log2FoldChange), color = gene.score)) + 
-              stat_summary(fun.data = function(x) return(data.frame('y' = mean(x), 'ymin' = max(mean(x)-sd(x),0), 'ymax' = mean(x)+sd(x))), 
-                           geom = 'errorbar', width = 0.5, color = '#999999') + stat_summary(fun = mean, geom = 'point', size = 3) + 
-              stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', method.args = list(var.equal = FALSE), 
+              stat_summary(fun.data = function(x) return(truncated_sd(x)), geom = 'errorbar', width = 0.5, 
+                           color = '#999999') + 
+              stat_summary(fun = mean, geom = 'point', size = 3) + 
+              stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
+                                 method.args = list(var.equal = FALSE), 
                                  label.y = c(.5, .45, .4, .7, .65, .6, rep(0.8, 3)), tip.length = 0.01) +
               scale_colour_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + xlab('') + ylab('LFC Magnitude') +
               theme_minimal() + theme(legend.position = 'none')
+rm(truncated_sd)
 ```
 
 We know that in general there is a negative relation between mean expression and lFC in genes, and we also know that there is a strong relation between SFARI Gene Scores and the mean level of expression of the genes.
@@ -470,8 +517,10 @@ p1 = plot_data %>% ggplot(aes(gene.score, meanExpr, fill=gene.score)) + geom_box
      scale_fill_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + theme_minimal() +
      ylab('Mean Level of Expression') + xlab('SFARI Gene Score') + theme(legend.position='none')
 
-p2 = plot_data %>% ggplot(aes(meanExpr, abs(log2FoldChange), color = gene.score)) + geom_point(alpha=plot_data$alpha) + geom_smooth(method='lm', color='#999999') + 
-     ylab('LogFoldChange Magnitude') + xlab('Mean Expression') + scale_color_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + 
+p2 = plot_data %>% ggplot(aes(meanExpr, abs(log2FoldChange), color = gene.score)) + 
+     geom_point(alpha=plot_data$alpha) + geom_smooth(method='lm', color='#999999') + 
+     ylab('LogFoldChange Magnitude') + xlab('Mean Expression') + 
+     scale_color_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + 
      theme_minimal() + theme(legend.position = 'none')
 
 p2 = ggExtra::ggMarginal(p2, type='density',groupColour = TRUE, size=10)
@@ -480,6 +529,28 @@ grid.arrange(p2, p1, ncol=2, widths = c(0.6, 0.4))
 
 rm(p1,p2)
 ```
+
+```{r}
+plot_data = data.frame('meanExpr' = rowMeans(datExpr), 'LFC_magnitude' = abs(genes_info$log2FoldChange), 
+                       'gene.score' = genes_info$gene.score, 'p' = NA) %>% arrange(meanExpr)
+
+w = 1000
+for(i in 1:(nrow(plot_data)-w)){
+  plot_data$p[i+floor(w/2)] = mean(plot_data$LFC_magnitude[i:(i+w)])
+}
+
+aux_data = plot_data %>% filter(!gene.score %in% c('Neuronal','Others')) %>% group_by(gene.score) %>%
+           dplyr::summarise(mean_by_score = mean(meanExpr)) %>% ungroup %>% 
+           mutate('color' = SFARI_colour_hue(r=1:6)[1:3])
+
+ggplotly(plot_data %>% filter(!is.na(p)) %>% ggplot(aes(meanExpr, p)) + geom_line() +
+         xlab('Mean Level of Expression') + ylab('Sliding Average of LFC Magnitude') +
+         geom_vline(data = aux_data, aes(xintercept = mean_by_score), color = aux_data$color) + 
+         ggtitle('Sliding Average of LFC Magnitude by Mean Level of Expression') + theme_minimal())
+
+rm(aux_data)
+```
+
 
 ### Fold-Change Magnitude controlling by level of expression
 <br>
@@ -513,30 +584,38 @@ n = 100
 plot_data = genes_info %>% dplyr::select(ID, log2FoldChange, gene.score) %>%
             left_join(data.frame('ID' = rownames(datExpr), 'meanExpr' = rowMeans(datExpr)), by = 'ID')
 
-SFARI_gene = plot_data %>% filter(gene.score %in% c('1','2','3','4','5','6')) %>% sample_n(1) %>% mutate(d=0, alpha = 1)
-nn = plot_data %>% filter(gene.score %in% c('Neuronal','Others')) %>% mutate(d = abs(meanExpr-SFARI_gene$meanExpr), alpha=0.5) %>% top_n(n=-n, wt = d)
+SFARI_gene = plot_data %>% filter(gene.score %in% c('1','2','3','4','5','6')) %>% sample_n(1) %>% 
+             mutate(d=0, alpha = 1)
+nn = plot_data %>% filter(gene.score %in% c('Neuronal','Others')) %>% 
+     mutate(d = abs(meanExpr-SFARI_gene$meanExpr), alpha=0.5) %>% top_n(n=-n, wt = d)
 
-plot_data = rbind(SFARI_gene, nn) %>% mutate(std_magnitude = (abs(log2FoldChange) - mean(abs(log2FoldChange)))/sd(abs(log2FoldChange)))
+plot_data = rbind(SFARI_gene, nn) %>% 
+            mutate(std_magnitude = (abs(log2FoldChange) - mean(abs(log2FoldChange)))/sd(abs(log2FoldChange)))
 
-p1 = plot_data %>% ggplot(aes(meanExpr, abs(log2FoldChange), color = gene.score)) + geom_point(alpha = plot_data$alpha) + 
+p1 = plot_data %>% ggplot(aes(meanExpr, abs(log2FoldChange), color = gene.score)) + 
+     geom_point(alpha = plot_data$alpha) + xlab('Mean Expression') + ylab('Log2 Fold Change Magnitude') + 
      scale_color_manual(values=SFARI_colour_hue(r=c(as.numeric(SFARI_gene$gene.score),8,7))) + 
-     xlab('Mean Expression') + ylab('Log2 Fold Change Magnitude') + theme_minimal() + theme(legend.position='none')
+     theme_minimal() + theme(legend.position='none')
 
-p2 = plot_data %>% ggplot(aes(meanExpr, std_magnitude, color = gene.score)) + geom_point(alpha = plot_data$alpha) + 
+p2 = plot_data %>% ggplot(aes(meanExpr, std_magnitude, color = gene.score)) + 
+     geom_point(alpha = plot_data$alpha) + 
      geom_hline(aes(yintercept = mean(std_magnitude)), linetype = 'dashed', color = '#999999') + 
      scale_color_manual(values=SFARI_colour_hue(r=c(as.numeric(SFARI_gene$gene.score),8,7))) + 
-     geom_segment(aes(x=SFARI_gene$meanExpr, y=mean(std_magnitude), xend = SFARI_gene$meanExpr, yend = std_magnitude[1]),
-                  alpha = 0.5, color = SFARI_colour_hue(r=1:8)[as.numeric(SFARI_gene$gene.score)]) +
-     xlab('Mean Expression') + ylab('Standardised LFC Magnitude') + theme_minimal() + theme(legend.position='none')
+     geom_segment(aes(x=SFARI_gene$meanExpr, y=mean(std_magnitude), xend = SFARI_gene$meanExpr, 
+                  yend = std_magnitude[1]), alpha = 0.5, 
+                  color = SFARI_colour_hue(r=1:8)[as.numeric(SFARI_gene$gene.score)]) +
+     xlab('Mean Expression') + ylab('Standardised LFC Magnitude') + 
+     theme_minimal() + theme(legend.position='none')
 for(i in 1:15){
 random_sample = plot_data %>% filter(gene.score != SFARI_gene$gene.score) %>% sample_n(1)
-p2 = p2 + geom_segment(x=random_sample$meanExpr, xend = random_sample$meanExpr, y=mean(plot_data$std_magnitude), yend = random_sample$std_magnitude,
-                  alpha = 0.5, color = 'gray')  
+p2 = p2 + geom_segment(x=random_sample$meanExpr, xend = random_sample$meanExpr, y=mean(plot_data$std_magnitude), 
+                       yend = random_sample$std_magnitude, alpha = 0.5, color = 'gray')  
 }
 
 grid.arrange(p1, p2, ncol=2, top='Comparing SFARI Genes with their n closest neighbours by Mean Expression')
 
-cat(paste0('SFARI gene\'s standardised distance to its neigbours\'s LFC magnitude: ', round(plot_data$std_magnitude[1],4)))
+cat(paste0('SFARI gene\'s standardised distance to its neigbours\'s LFC magnitude: ',
+           round(plot_data$std_magnitude[1],4)))
 
 rm(p1, p2, SFARI_gene, nn, random_sample, i)
 ```
@@ -564,9 +643,11 @@ get_std_lfc_magnitudes = function(data_info, SFARI_score, n){
   
   for(i in 1:nrow(SFARI_genes)){
     SFARI_gene = SFARI_genes[i,]
-    nn = data_info %>% filter(gene.score %in% c('Neuronal','Others')) %>% mutate(d = abs(meanExpr-SFARI_gene$meanExpr)) %>% top_n(n=-n, wt = d) %>% dplyr::select(-d)
-    iter_data = rbind(SFARI_gene, nn) %>% mutate(std_magnitude = (abs(log2FoldChange) - mean(abs(log2FoldChange)))/sd(abs(log2FoldChange))) %>%
-                 dplyr::select(gene.score, std_magnitude)
+    nn = data_info %>% filter(gene.score %in% c('Neuronal','Others')) %>%
+         mutate(d = abs(meanExpr-SFARI_gene$meanExpr)) %>% top_n(n=-n, wt = d) %>% dplyr::select(-d)
+    iter_data = rbind(SFARI_gene, nn) %>% 
+          mutate(std_magnitude = (abs(log2FoldChange) - mean(abs(log2FoldChange)))/sd(abs(log2FoldChange))) %>%
+          dplyr::select(gene.score, std_magnitude)
     std_magnitudes = rbind(std_magnitudes, iter_data)
   }
   
@@ -580,42 +661,55 @@ std_magnitudes_score_1 = get_std_lfc_magnitudes(data_info, 1, n)
 std_magnitudes_score_2 = get_std_lfc_magnitudes(data_info, 2, n)
 std_magnitudes_score_3 = get_std_lfc_magnitudes(data_info, 3, n)
 
-p1 = std_magnitudes_score_1 %>% ggplot(aes(gene.score, std_magnitude, fill = gene.score)) + geom_boxplot() + xlab('') + ylab('Standardised LFC Magnitude') +
-                                scale_fill_manual(values=SFARI_colour_hue(r=c(1,8,7))) + theme_minimal() + theme(legend.position = 'none')
-p2 = std_magnitudes_score_2 %>% ggplot(aes(gene.score, std_magnitude, fill = gene.score)) + geom_boxplot() + xlab('') + ylab('') +
-                                scale_fill_manual(values=SFARI_colour_hue(r=c(2,8,7))) + theme_minimal() + theme(legend.position = 'none')
-p3 = std_magnitudes_score_3 %>% ggplot(aes(gene.score, std_magnitude, fill = gene.score)) + geom_boxplot() + xlab('') + ylab('') +
-                                scale_fill_manual(values=SFARI_colour_hue(r=c(3,8,7))) + theme_minimal() + theme(legend.position = 'none')
+p1 = std_magnitudes_score_1 %>% ggplot(aes(gene.score, std_magnitude, fill = gene.score)) + geom_boxplot() + 
+     xlab('') + ylab('Standardised LFC Magnitude') + scale_fill_manual(values=SFARI_colour_hue(r=c(1,8,7))) + 
+     theme_minimal() + theme(legend.position = 'none')
+p2 = std_magnitudes_score_2 %>% ggplot(aes(gene.score, std_magnitude, fill = gene.score)) + geom_boxplot() + 
+     xlab('') + ylab('') + scale_fill_manual(values=SFARI_colour_hue(r=c(2,8,7))) + theme_minimal() + 
+     theme(legend.position = 'none')
+p3 = std_magnitudes_score_3 %>% ggplot(aes(gene.score, std_magnitude, fill = gene.score)) + geom_boxplot() + 
+     xlab('') + ylab('') + scale_fill_manual(values=SFARI_colour_hue(r=c(3,8,7))) + theme_minimal() + 
+     theme(legend.position = 'none')
 
-grid.arrange(p1,p2,p3,nrow=1, top = 'Comparison of LFC Magnitude of SFARI gens and their closest neighbours by Mean Expression')
+grid.arrange(p1,p2,p3,nrow=1,
+             top = 'Comparison of LFC Magnitude of SFARI gens and their closest neighbours by Mean Expression')
 
 
-rm(p1,p2,p3)#,std_magnitudes_score_1, std_magnitudes_score_2, std_magnitudes_score_3)
+rm(p1,p2,p3)
 ```
 
 ```{r, fig.width=10}
 p1 = std_magnitudes_score_1 %>% ggplot(aes(gene.score, std_magnitude, color = gene.score)) + 
-     stat_summary(fun.data = mean_sd, geom = 'errorbar', width = 0.5, color = '#999999') + stat_summary(fun = mean, geom = 'point', size = 3) +
-     stat_compare_means(comparisons = list(c('1','Neuronal'), c('1','Others')), label = 'p.signif', method = 't.test', 
-                        method.args = list(var.equal = FALSE), label.y = c(1.7, 2), tip.length = 0.01) +
+     stat_summary(fun.data = mean_sd, geom = 'errorbar', width = 0.5, color = '#999999') + s
+     tat_summary(fun = mean, geom = 'point', size = 3) +
+     stat_compare_means(comparisons = list(c('1','Neuronal'), c('1','Others')), label = 'p.signif',
+                        method = 't.test', method.args = list(var.equal = FALSE), label.y = c(1.7, 2), 
+                        tip.length = 0.01) +
      scale_colour_manual(values=SFARI_colour_hue(r=c(1,8,7))) + xlab('') + ylab('Standardised LFC Magnitude') +
      theme_minimal() + theme(legend.position = 'none')
 
 p2 = std_magnitudes_score_2 %>% ggplot(aes(gene.score, std_magnitude, color = gene.score)) + 
-     stat_summary(fun.data = mean_sd, geom = 'errorbar', width = 0.5, color = '#999999') + stat_summary(fun = mean, geom = 'point', size = 3) +
-     stat_compare_means(comparisons = list(c('2','Neuronal'), c('2','Others')), label = 'p.signif', method = 't.test', 
-                        method.args = list(var.equal = FALSE), label.y = c(1.7, 2), tip.length = 0.01) +
+     stat_summary(fun.data = mean_sd, geom = 'errorbar', width = 0.5, color = '#999999') + 
+     stat_summary(fun = mean, geom = 'point', size = 3) +
+     stat_compare_means(comparisons = list(c('2','Neuronal'), c('2','Others')), label = 'p.signif',
+                        method = 't.test', method.args = list(var.equal = FALSE), label.y = c(1.7, 2),
+                        tip.length = 0.01) +
      scale_colour_manual(values=SFARI_colour_hue(r=c(2,8,7))) + xlab('') + ylab('Standardised LFC Magnitude') +
      theme_minimal() + theme(legend.position = 'none')
 
 p3 = std_magnitudes_score_3 %>% ggplot(aes(gene.score, std_magnitude, color = gene.score)) +
-     stat_summary(fun.data = mean_sd, geom = 'errorbar', width = 0.5, color = '#999999') + stat_summary(fun = mean, geom = 'point', size = 3) +
-     stat_compare_means(comparisons = list(c('3','Neuronal'), c('3','Others')), label = 'p.signif', method = 't.test', 
-                        method.args = list(var.equal = FALSE), label.y = c(1.7, 2), tip.length = 0.01) +
+     stat_summary(fun.data = mean_sd, geom = 'errorbar', width = 0.5, color = '#999999') + 
+     stat_summary(fun = mean, geom = 'point', size = 3) +
+     stat_compare_means(comparisons = list(c('3','Neuronal'), c('3','Others')), label = 'p.signif', 
+                        method = 't.test', method.args = list(var.equal = FALSE), label.y = c(1.7, 2),
+                        tip.length = 0.01) +
      scale_colour_manual(values=SFARI_colour_hue(r=c(3,8,7))) + xlab('') + ylab('Standardised LFC Magnitude') +
      theme_minimal() + theme(legend.position = 'none')
 
-grid.arrange(p1,p2,p3,nrow=1, top = 'Comparison of LFC Magnitude of SFARI genes and their closest neighbours by Mean Expression')
+grid.arrange(p1,p2,p3,nrow=1,
+             top = 'Comparison of LFC Magnitude of SFARI genes and their closest neighbours by Mean Expression')
+
+rm(std_magnitudes_score_1, std_magnitudes_score_2, std_magnitudes_score_3)
 ```
 
 
@@ -625,11 +719,20 @@ Null hypothesis: Differences in means is equal to zero
 
 ```{r}
 get_t_test_vals = function(std_magnitudes_score, score){
-  t_test_Neuronal = t.test(std_magnitude ~ gene.score, data = std_magnitudes_score[std_magnitudes_score$gene.score != 'Others',], var.equal=FALSE)
-  t_test_others = t.test(std_magnitude ~ gene.score, data = std_magnitudes_score[std_magnitudes_score$gene.score != 'Neuronal',], var.equal=FALSE)
+  t_test_Neuronal = t.test(std_magnitude ~ gene.score, 
+                           data = std_magnitudes_score[std_magnitudes_score$gene.score != 'Others',], 
+                           var.equal=FALSE)
+  t_test_others = t.test(std_magnitude ~ gene.score, 
+                         data = std_magnitudes_score[std_magnitudes_score$gene.score != 'Neuronal',], 
+                         var.equal=FALSE)
   
-  return(rbind(c(score, 'Neuronal', t_test_Neuronal$estimate[1][[1]], t_test_Neuronal$estimate[2][[1]], t_test_Neuronal$p.value),
-               c(score, 'Others', t_test_others$estimate[1][[1]], t_test_others$estimate[2][[1]], t_test_others$p.value)))
+  neuronal = c(score, 'Neuronal', t_test_Neuronal$estimate[1][[1]],
+               t_test_Neuronal$estimate[2][[1]], t_test_Neuronal$p.value)
+  
+  others = c(score, 'Others', t_test_others$estimate[1][[1]], t_test_others$estimate[2][[1]],
+             t_test_others$p.value)
+  
+  return(rbind(neuronal, others))
 }
 
 results_1 = get_t_test_vals(std_magnitudes_score_1, 1)
@@ -637,7 +740,8 @@ results_2 = get_t_test_vals(std_magnitudes_score_2, 2)
 results_3 = get_t_test_vals(std_magnitudes_score_3, 3)
 
 t_test_df = rbind(results_1, results_2, results_3) %>% data.frame %>% 
-            dplyr::rename('SFARI_score' = X1, 'Comparison' = X2, 'mean_group_1' = X3, 'mean_group_2' = X4, 'p_val' = X5) %>% 
+            dplyr::rename('SFARI_score' = X1, 'Comparison' = X2, 'mean_group_1' = X3, 
+                          'mean_group_2' = X4, 'p_val' = X5) %>% 
             mutate(BH_p_val = p.adjust(as.numeric(as.character(p_val)), method = 'BH')) %>% 
             mutate(same_mean = ifelse(BH_p_val<0.05, 'No', 'Possible'))
 
@@ -655,29 +759,56 @@ The proportion of DE genes for each SFARI Genes is quite similar
 
 ```{r}
 plot_info = genes_info %>% group_by(gene.score, significant) %>% tally(name = 'DE') %>% ungroup %>% ungroup %>%
-            left_join(genes_info %>% group_by(gene.score) %>% tally(name = 'total') %>% ungroup, by = 'gene.score') %>% filter(significant) %>% 
+            left_join(genes_info %>% group_by(gene.score) %>% tally(name = 'total') %>% 
+                        ungroup, by = 'gene.score') %>% filter(significant) %>% 
             mutate('perc' = 100*DE/total)
 
-ggplotly(plot_info %>% ggplot(aes(gene.score, perc, fill = gene.score)) + geom_bar(stat='identity') + xlab('SFARI Gene Score') + ylab('% of DE genes') +
-              scale_fill_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + theme_minimal() + theme(legend.position = 'none'))
+ggplotly(plot_info %>% ggplot(aes(gene.score, perc, fill = gene.score)) + geom_bar(stat='identity') + 
+         xlab('SFARI Gene Score') + ylab('% of DE genes') +  theme_minimal() + theme(legend.position = 'none') +
+         scale_fill_manual(values=SFARI_colour_hue(r=c(1:3,8,7))))
 ```
 
 But in our dataset, the higher the level of expression of a gene, the more likely the gene is to be DE (this can be seen by ordering the genes by level of expression and calculating the proportion of DE Genes using a sliding window). Based one this, the SFARI Score 1 should have the highest proportion of DE Genes, followed by score 2 and score 3 in the end
 
 ```{r}
 
-plot_data = data.frame('meanExpr' = rowMeans(datExpr), 'DE' = genes_info$significant, 'gene.score' = genes_info$gene.score, 'p' = NA) %>% arrange(meanExpr)
+plot_data = data.frame('meanExpr' = rowMeans(datExpr), 'DE' = genes_info$significant, 
+                       'gene.score' = genes_info$gene.score, 'p' = NA) %>% arrange(meanExpr)
 
 w = 1000
 for(i in 1:(nrow(plot_data)-w)){
   plot_data$p[i+floor(w/2)] = mean(plot_data$DE[i:(i+w)])*100
 }
 
-ggplotly(plot_data %>% filter(!is.na(p)) %>% ggplot(aes(meanExpr, p)) + geom_line() + xlab('Mean Level of Expression') + ylab('% of DE Genes in Sliding Window') +
-         geom_vline(xintercept = mean(plot_data$meanExpr[plot_data$gene.score=='1']), color = SFARI_colour_hue(r=1:6)[1]) +
-         geom_vline(xintercept = mean(plot_data$meanExpr[plot_data$gene.score=='2']), color = SFARI_colour_hue(r=1:6)[2]) +
-         geom_vline(xintercept = mean(plot_data$meanExpr[plot_data$gene.score=='3']), color = SFARI_colour_hue(r=1:6)[3]) + theme_minimal())
 
+aux_data = plot_data %>% filter(!gene.score %in% c('Neuronal','Others')) %>% group_by(gene.score) %>%
+           dplyr::summarise(mean_by_score = mean(meanExpr)) %>% ungroup %>% 
+           mutate('color' = SFARI_colour_hue(r=1:6)[1:3])
+
+ggplotly(plot_data %>% filter(!is.na(p)) %>% ggplot(aes(meanExpr, p)) + geom_line() +
+         xlab('Mean Level of Expression') + ylab('Sliding Percentage of DE Genes') +
+         geom_vline(data = aux_data, aes(xintercept = mean_by_score), color = aux_data$color) + 
+         ggtitle('Sliding Percentage of DE Genes by Mean Level of Expression') + theme_minimal())  
+
+# aux_data = plot_data %>% group_by(gene.score) %>% 
+#            dplyr::summarise('mean_ME' = mean(meanExpr), 'sd_ME' = sd(meanExpr)) %>%  ungroup %>%
+#            mutate(xmin = mean_ME-sd_ME, xmax = mean_ME+sd_ME, 
+#                   ymin = min(plot_data$p, na.rm = TRUE)*0.8, ymax = max(plot_data$p, na.rm = TRUE)*1.2) %>%
+#            filter(gene.score %in% c('1','2','3'))
+
+# plot_data %>% filter(!is.na(p)) %>% ggplot(aes(meanExpr, p)) + geom_line() + 
+#          xlab('Mean Level of Expression') + ylab('% of DE Genes in Sliding Window') +
+#          geom_vline(xintercept = aux_data$mean_ME[aux_data$gene.score == '1'], 
+#                     color = SFARI_colour_hue(r=1:6)[1]) +
+#          geom_vline(xintercept = mean(plot_data$meanExpr[plot_data$gene.score=='2']), 
+#                     color = SFARI_colour_hue(r=1:6)[2]) +
+#          geom_vline(xintercept = mean(plot_data$meanExpr[plot_data$gene.score=='3']), 
+#                     color = SFARI_colour_hue(r=1:6)[3]) + theme_minimal() +
+#          annotate('rect', xmin = aux_data$xmin, xmax = aux_data$xmax, ymin = aux_data$ymin, ymax = aux_data$ymax, 
+#             fill = SFARI_colour_hue(r=1:6)[1:3], color = 'transparent', alpha = 0.2),
+#         theme_minimal())
+
+rm(aux_data)
 ```
 
 <br>
@@ -718,7 +849,8 @@ get_neighbours_DE = function(data_info, SFARI_score, n){
   
   for(i in 1:nrow(SFARI_genes)){
     SFARI_gene = SFARI_genes[i,]
-    nn = data_info %>% filter(gene.score %in% c('Neuronal','Others')) %>% mutate(d = abs(meanExpr-SFARI_gene$meanExpr)) %>% top_n(n=-n, wt = d) %>%
+    nn = data_info %>% filter(gene.score %in% c('Neuronal','Others')) %>% 
+         mutate(d = abs(meanExpr-SFARI_gene$meanExpr)) %>% top_n(n=-n, wt = d) %>%
          group_by(gene.score) %>% summarise(perc_DE = 100*mean(significant)) %>% ungroup
     perc_DE = rbind(perc_DE, nn)
   }
@@ -744,68 +876,88 @@ perc_DE_nn_score_1 = get_neighbours_DE(data_info, 1, n)
 perc_DE_nn_score_2 = get_neighbours_DE(data_info, 2, n)
 perc_DE_nn_score_3 = get_neighbours_DE(data_info, 3, n)
 
-p1 = perc_DE_nn_score_1 %>% ggplot(aes(gene.score, perc_DE, fill = gene.score)) + geom_boxplot() + xlab('') + ylab('% of DE Genes') +
-                            geom_hline(yintercept = 100*mean(genes_info$significant[genes_info$gene.score=='1']), color = SFARI_colour_hue(r=1:6)[1]) +
-                            ggtitle(paste0('Neighbours of SFARI Genes with Score 1',
-                                           '\n\n   Dist to Neuronal: ', calc_dist('1', perc_DE_nn_score_1, 'Neuronal'), ' SD',
-                                           '\n   Dist to Others: ', calc_dist('1', perc_DE_nn_score_1, 'Others'), ' SD')) +
-                            scale_fill_manual(values=SFARI_colour_hue(r=c(8,7))) + theme_minimal() + theme(legend.position = 'none')
+p1 = perc_DE_nn_score_1 %>% ggplot(aes(gene.score, perc_DE, fill = gene.score)) + geom_boxplot() + 
+     xlab('') + ylab('% of DE Genes') + 
+     geom_hline(yintercept = 100*mean(genes_info$significant[genes_info$gene.score=='1']), 
+                color = SFARI_colour_hue(r=1:6)[1]) +
+     ggtitle(paste0('Neighbours of SFARI Score 1 Genes',
+                    '\n\n   Dist to Neuronal: ', calc_dist('1', perc_DE_nn_score_1, 'Neuronal'), ' SD',
+                    '\n   Dist to Others: ', calc_dist('1', perc_DE_nn_score_1, 'Others'), ' SD')) +
+    scale_fill_manual(values=SFARI_colour_hue(r=c(8,7))) + theme_minimal() + theme(legend.position = 'none')
 
-p2 = perc_DE_nn_score_2 %>% ggplot(aes(gene.score, perc_DE, fill = gene.score)) + geom_boxplot() + xlab('') + ylab('% of DE Genes') +
-                            geom_hline(yintercept = 100*mean(genes_info$significant[genes_info$gene.score=='2']), color = SFARI_colour_hue(r=1:6)[2]) +
-                            ggtitle(paste0('Neighbours of SFARI Genes with Score 2',
-                                           '\n\n   Dist to Neuronal: ', calc_dist('2', perc_DE_nn_score_2, 'Neuronal'), ' SD',
-                                           '\n   Dist to Others: ', calc_dist('2', perc_DE_nn_score_2, 'Others'), ' SD')) +
-                            scale_fill_manual(values=SFARI_colour_hue(r=c(8,7))) + theme_minimal() + theme(legend.position = 'none')
+p2 = perc_DE_nn_score_2 %>% ggplot(aes(gene.score, perc_DE, fill = gene.score)) + geom_boxplot() + 
+     xlab('') + ylab('% of DE Genes') + 
+     geom_hline(yintercept = 100*mean(genes_info$significant[genes_info$gene.score=='2']), 
+                color = SFARI_colour_hue(r=1:6)[2]) +
+     ggtitle(paste0('Neighbours of SFARI Score 2 Genes',
+                     '\n\n   Dist to Neuronal: ', calc_dist('2', perc_DE_nn_score_2, 'Neuronal'), ' SD',
+                     '\n   Dist to Others: ', calc_dist('2', perc_DE_nn_score_2, 'Others'), ' SD')) +
+     scale_fill_manual(values=SFARI_colour_hue(r=c(8,7))) + theme_minimal() + theme(legend.position = 'none')
 
-p3 = perc_DE_nn_score_3 %>% ggplot(aes(gene.score, perc_DE, fill = gene.score)) + geom_boxplot() + xlab('') + ylab('% of DE Genes') +
-                            geom_hline(yintercept = 100*mean(genes_info$significant[genes_info$gene.score=='3']), color = SFARI_colour_hue(r=1:6)[3]) +
-                            ggtitle(paste0('Neighbours of SFARI Genes with Score 3',
-                                           '\n\n   Dist to Neuronal: ', calc_dist('3', perc_DE_nn_score_3, 'Neuronal'), ' SD',
-                                           '\n   Dist to Others: ', calc_dist('3', perc_DE_nn_score_3, 'Others'), ' SD')) +
-                            scale_fill_manual(values=SFARI_colour_hue(r=c(8,7))) + theme_minimal() + theme(legend.position = 'none')
+p3 = perc_DE_nn_score_3 %>% ggplot(aes(gene.score, perc_DE, fill = gene.score)) + geom_boxplot() + 
+     xlab('') + ylab('% of DE Genes') +
+     geom_hline(yintercept = 100*mean(genes_info$significant[genes_info$gene.score=='3']), 
+                color = SFARI_colour_hue(r=1:6)[3]) +
+     ggtitle(paste0('Neighbours of SFARI Score 3 Genes',
+                    '\n\n   Dist to Neuronal: ', calc_dist('3', perc_DE_nn_score_3, 'Neuronal'), ' SD',
+                    '\n   Dist to Others: ', calc_dist('3', perc_DE_nn_score_3, 'Others'), ' SD')) +
+     scale_fill_manual(values=SFARI_colour_hue(r=c(8,7))) + theme_minimal() + theme(legend.position = 'none')
 
 grid.arrange(p1,p2,p3, nrow = 1)
 ```
 
 ```{r fig.width=12, fig.height=5}
 
-ymax = max(mean(perc_DE_nn_score_1$perc_DE[perc_DE_nn_score_1$gene.score=='Neuronal'])+sd(perc_DE_nn_score_1$perc_DE[perc_DE_nn_score_1$gene.score=='Neuronal']), 
-           mean(perc_DE_nn_score_2$perc_DE[perc_DE_nn_score_2$gene.score=='Neuronal'])+sd(perc_DE_nn_score_2$perc_DE[perc_DE_nn_score_2$gene.score=='Neuronal']), 
-           mean(perc_DE_nn_score_3$perc_DE[perc_DE_nn_score_3$gene.score=='Neuronal'])+sd(perc_DE_nn_score_3$perc_DE[perc_DE_nn_score_3$gene.score=='Neuronal']))
+ymax = max(mean(perc_DE_nn_score_1$perc_DE[perc_DE_nn_score_1$gene.score=='Neuronal'])+
+             sd(perc_DE_nn_score_1$perc_DE[perc_DE_nn_score_1$gene.score=='Neuronal']), 
+           mean(perc_DE_nn_score_2$perc_DE[perc_DE_nn_score_2$gene.score=='Neuronal'])+
+             sd(perc_DE_nn_score_2$perc_DE[perc_DE_nn_score_2$gene.score=='Neuronal']), 
+           mean(perc_DE_nn_score_3$perc_DE[perc_DE_nn_score_3$gene.score=='Neuronal'])+
+             sd(perc_DE_nn_score_3$perc_DE[perc_DE_nn_score_3$gene.score=='Neuronal']))
 
-ymin = min(mean(perc_DE_nn_score_1$perc_DE[perc_DE_nn_score_1$gene.score=='Neuronal'])-sd(perc_DE_nn_score_1$perc_DE[perc_DE_nn_score_1$gene.score=='Neuronal']), 
-           mean(perc_DE_nn_score_2$perc_DE[perc_DE_nn_score_2$gene.score=='Neuronal'])-sd(perc_DE_nn_score_2$perc_DE[perc_DE_nn_score_2$gene.score=='Neuronal']), 
-           mean(perc_DE_nn_score_3$perc_DE[perc_DE_nn_score_3$gene.score=='Neuronal'])-sd(perc_DE_nn_score_3$perc_DE[perc_DE_nn_score_3$gene.score=='Neuronal']))
+ymin = min(mean(perc_DE_nn_score_1$perc_DE[perc_DE_nn_score_1$gene.score=='Neuronal'])-
+             sd(perc_DE_nn_score_1$perc_DE[perc_DE_nn_score_1$gene.score=='Neuronal']), 
+           mean(perc_DE_nn_score_2$perc_DE[perc_DE_nn_score_2$gene.score=='Neuronal'])-
+             sd(perc_DE_nn_score_2$perc_DE[perc_DE_nn_score_2$gene.score=='Neuronal']), 
+           mean(perc_DE_nn_score_3$perc_DE[perc_DE_nn_score_3$gene.score=='Neuronal'])-
+             sd(perc_DE_nn_score_3$perc_DE[perc_DE_nn_score_3$gene.score=='Neuronal']))
 
 
 p1 = perc_DE_nn_score_1 %>% ggplot(aes(gene.score, perc_DE, color = gene.score)) + 
-     stat_summary(fun.data = mean_sd, geom = 'errorbar', width = 0.5, color = '#999999') + stat_summary(fun = mean, geom = 'point', size = 3) +
-     geom_hline(yintercept = 100*mean(genes_info$significant[genes_info$gene.score=='1']), color = SFARI_colour_hue(r=1:6)[1]) +
-                ggtitle(paste0('Neighbours of SFARI Genes with Score 1',
-                               '\n\n   Dist to Neuronal: ', calc_dist('1', perc_DE_nn_score_1, 'Neuronal'), ' SD',
-                               '\n   Dist to Others: ', calc_dist('1', perc_DE_nn_score_1, 'Others'), ' SD')) +
-     scale_colour_manual(values=SFARI_colour_hue(r=c(8,7))) + xlab('') + ylab('Standardised LFC Magnitude') + coord_cartesian(ylim = c(ymin, ymax)) +
-     theme_minimal() + theme(legend.position = 'none')
+     stat_summary(fun.data = mean_sd, geom = 'errorbar', width = 0.5, color = '#999999') + 
+     stat_summary(fun = mean, geom = 'point', size = 3) +
+     geom_hline(yintercept = 100*mean(genes_info$significant[genes_info$gene.score=='1']), 
+                color = SFARI_colour_hue(r=1:6)[1]) +
+     ggtitle(paste0('SFARI Score 1 Genes',
+                    '\n\n   Dist to Neuronal: ', calc_dist('1', perc_DE_nn_score_1, 'Neuronal'), ' SD',
+                    '\n   Dist to Others: ', calc_dist('1', perc_DE_nn_score_1, 'Others'), ' SD')) +
+     scale_colour_manual(values=SFARI_colour_hue(r=c(8,7))) + 
+     xlab('Neighbours') + ylab('Percentage of DE Genes') + 
+     coord_cartesian(ylim = c(ymin, ymax)) + theme_minimal() + theme(legend.position = 'none')
   
   
 p2 = perc_DE_nn_score_2 %>% ggplot(aes(gene.score, perc_DE, color = gene.score)) + 
-     stat_summary(fun.data = mean_sd, geom = 'errorbar', width = 0.5, color = '#999999') + stat_summary(fun = mean, geom = 'point', size = 3) +
-     geom_hline(yintercept = 100*mean(genes_info$significant[genes_info$gene.score=='2']), color = SFARI_colour_hue(r=1:6)[2]) +
-                ggtitle(paste0('Neighbours of SFARI Genes with Score 2',
-                               '\n\n   Dist to Neuronal: ', calc_dist('2', perc_DE_nn_score_2, 'Neuronal'), ' SD',
-                               '\n   Dist to Others: ', calc_dist('2', perc_DE_nn_score_2, 'Others'), ' SD')) +
-     scale_colour_manual(values=SFARI_colour_hue(r=c(8,7))) + xlab('') + ylab('') +coord_cartesian(ylim = c(ymin, ymax)) +
+     stat_summary(fun.data = mean_sd, geom = 'errorbar', width = 0.5, color = '#999999') + 
+     stat_summary(fun = mean, geom = 'point', size = 3) +
+     geom_hline(yintercept = 100*mean(genes_info$significant[genes_info$gene.score=='2']), 
+                color = SFARI_colour_hue(r=1:6)[2]) +
+     ggtitle(paste0('SFARI Score 2 Genes',
+                    '\n\n   Dist to Neuronal: ', calc_dist('2', perc_DE_nn_score_2, 'Neuronal'), ' SD',
+                    '\n   Dist to Others: ', calc_dist('2', perc_DE_nn_score_2, 'Others'), ' SD')) +
+     scale_colour_manual(values=SFARI_colour_hue(r=c(8,7))) + xlab('Neighbours') + ylab('') + 
+     coord_cartesian(ylim = c(ymin, ymax)) +
      theme_minimal() + theme(legend.position = 'none')
 
 p3 = perc_DE_nn_score_3 %>% ggplot(aes(gene.score, perc_DE, color = gene.score)) + 
-     stat_summary(fun.data = mean_sd, geom = 'errorbar', width = 0.5, color = '#999999') + stat_summary(fun = mean, geom = 'point', size = 3) +
-     geom_hline(yintercept = 100*mean(genes_info$significant[genes_info$gene.score=='3']), color = SFARI_colour_hue(r=1:6)[3]) +
-                ggtitle(paste0('Neighbours of SFARI Genes with Score 3',
-                               '\n\n   Dist to Neuronal: ', calc_dist('3', perc_DE_nn_score_3, 'Neuronal'), ' SD',
-                               '\n   Dist to Others: ', calc_dist('3', perc_DE_nn_score_3, 'Others'), ' SD')) +
-     scale_colour_manual(values=SFARI_colour_hue(r=c(8,7))) + xlab('') + ylab('') + coord_cartesian(ylim = c(ymin, ymax)) +
-     theme_minimal() + theme(legend.position = 'none')
+     stat_summary(fun.data = mean_sd, geom = 'errorbar', width = 0.5, color = '#999999') + 
+     stat_summary(fun = mean, geom = 'point', size = 3) +
+     geom_hline(yintercept = 100*mean(genes_info$significant[genes_info$gene.score=='3']), 
+                color = SFARI_colour_hue(r=1:6)[3]) +
+     ggtitle(paste0('SFARI Score 3 Genes',
+                    '\n\n   Dist to Neuronal: ', calc_dist('3', perc_DE_nn_score_3, 'Neuronal'), ' SD',
+                    '\n   Dist to Others: ', calc_dist('3', perc_DE_nn_score_3, 'Others'), ' SD')) +
+     scale_colour_manual(values=SFARI_colour_hue(r=c(8,7))) + xlab('Neighbours') + ylab('') + 
+     coord_cartesian(ylim = c(ymin, ymax)) + theme_minimal() + theme(legend.position = 'none')
 
 grid.arrange(p1,p2,p3, nrow = 1)
 
@@ -871,7 +1023,7 @@ lfc_counts_all = expand.grid('group'=unique(lfc_counts_all$group), 'lfc'=unique(
 tot_counts = genes_info %>% group_by(`gene-score`) %>% tally() %>% filter(`gene-score`!='Others') %>%
              mutate('group'=`gene-score`, 'tot'=n) %>% dplyr::select(group, tot) %>%
              bind_rows(data.frame('group'='Neuronal', 'tot'=sum(genes_info$Neuronal)),
-                       data.frame('group' = 'Others', 'tot' = sum(genes_info$gene.score == 'Others' & !genes_info$Neuronal)),
+                       data.frame('group'='Others', 'tot'=sum(genes_info$gene.score=='Others'&!genes_info$Neuronal)),
                        data.frame('group'='All', 'tot'=nrow(genes_info)))
 
 lfc_counts_all = lfc_counts_all %>% filter(lfc!=-1) %>% #, group!='Others') %>% 
@@ -879,11 +1031,13 @@ lfc_counts_all = lfc_counts_all %>% filter(lfc!=-1) %>% #, group!='Others') %>%
 
 
 # Plot change of number of genes
-ggplotly(lfc_counts_all %>% filter(group != 'All') %>% ggplot(aes(lfc, perc, color=group)) + geom_point(aes(id=n)) + geom_line() + 
-         scale_color_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + ylab('% of Differentially Expressed Genes') +  xlab('Fold Change') + 
+ggplotly(lfc_counts_all %>% filter(group != 'All') %>% ggplot(aes(lfc, perc, color=group)) + 
+         geom_point(aes(id=n)) + geom_line() + scale_color_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + 
+         ylab('% of Differentially Expressed Genes') +  xlab('Fold Change') + 
          ggtitle('Effect of filtering thresholds by SFARI score') + theme_minimal())
 
-rm(lfc_list, all_counts, Neuronal_counts, lfc_counts_all, lfc, lfc_counts, lfc_counts_all, tot_counts, lfc_counts_all, Others_counts)
+rm(lfc_list, all_counts, Neuronal_counts, lfc_counts_all, lfc, lfc_counts, lfc_counts_all, tot_counts,
+   lfc_counts_all, Others_counts)
 ```
 <br>
 
