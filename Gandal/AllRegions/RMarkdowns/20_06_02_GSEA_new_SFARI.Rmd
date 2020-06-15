@@ -1,5 +1,5 @@
 ---
-title: 'GSEA of Modules with highest Enrichment in SFARI Genes'
+title: 'GSEA of WGCNA Modules'
 output:
   html_document:
     code_folding: 'hide'
@@ -91,12 +91,11 @@ file_name = './../Data/GSEA_bonferroni.RData'
 if(file.exists(file_name)){
   load(file_name)
 } else {
-  
   ##############################################################################
   # PREPARE DATASET
   
   # Create dataset with top modules membership and removing the genes without an assigned module
-  EA_dataset = data.frame('ensembl_gene_id' = genes_info$ID, module = genes_info$Module)  %>% 
+  EA_dataset = data.frame('ensembl_gene_id' = genes_info$ID, module = genes_info$Module) %>% 
                filter(genes_info$Module!='gray')
   
   # Assign Entrez Gene Id to each gene
@@ -126,24 +125,29 @@ if(file.exists(file_name)){
   
   
   for(module in modules){
+    cat('\n')
+    cat(paste0('Module: ', which(modules == module), '/', length(modules)))
     geneList = EA_dataset[,paste0('MM.',substring(module,2))]
     names(geneList) = EA_dataset[,'entrezgene'] %>% as.character
     geneList = sort(geneList, decreasing = TRUE)
     
-    enrichment_GO[[module]] = gseGO(geneList, OrgDb = org.Hs.eg.db, pAdjustMethod = 'bonferroni', 
-                                    nPerm = nPerm, verbose = FALSE, seed = TRUE) %>% data.frame
-    enrichment_DO[[module]] = gseDO(geneList, pAdjustMethod = 'bonferroni', 
-                                    nPerm = nPerm, verbose = FALSE, seed = TRUE) %>% data.frame
-    enrichment_DGN[[module]] = gseDGN(geneList, pAdjustMethod = 'bonferroni', 
-                                      nPerm = nPerm, verbose = FALSE, seed = TRUE) %>% data.frame
-    enrichment_KEGG[[module]] = gseKEGG(geneList, organism = 'human', pAdjustMethod = 'bonferroni', 
-                                        nPerm = nPerm, verbose = FALSE, seed = TRUE) %>% data.frame
-    enrichment_Reactome[[module]] = gsePathway(geneList, organism = 'human', pAdjustMethod = 'bonferroni', 
-                                               nPerm = nPerm, verbose = FALSE, seed = TRUE) %>% data.frame
+    enrichment_GO[[module]] = gseGO(geneList, OrgDb = org.Hs.eg.db, pAdjustMethod = 'bonferroni', ont = 'All',
+                                    pvalueCutoff = 0.1, nPerm = nPerm, verbose = FALSE, seed = TRUE) %>% 
+                              data.frame
+    # enrichment_DO[[module]] = gseDO(geneList, pAdjustMethod = 'bonferroni', pvalueCutoff = 0.1,
+    #                                 nPerm = nPerm, verbose = FALSE, seed = TRUE) %>% data.frame
+    # enrichment_DGN[[module]] = gseDGN(geneList, pAdjustMethod = 'bonferroni', pvalueCutoff = 0.1,
+    #                                   nPerm = nPerm, verbose = FALSE, seed = TRUE) %>% data.frame
+    # enrichment_KEGG[[module]] = gseKEGG(geneList, organism = 'human', pAdjustMethod = 'bonferroni', 
+    #                                     pvalueCutoff = 0.1, nPerm = nPerm, verbose = FALSE, seed = TRUE) %>% 
+    #                             data.frame
+    # enrichment_Reactome[[module]] = gsePathway(geneList, organism = 'human', pAdjustMethod = 'bonferroni', 
+    #                                            pvalueCutoff = 0.1, nPerm = nPerm, verbose = FALSE, 
+    #                                            seed = TRUE) %>% data.frame
+    
+    # Temporal save, just in case SFARI Genes enrichment fails
+    save(enrichment_GO, enrichment_DO, enrichment_DGN, enrichment_KEGG, enrichment_Reactome, file=file_name)
   }
-  
-  # Temporal save, just in case SFARI Genes enrichment fails
-  save(enrichment_GO, enrichment_DO, enrichment_DGN, enrichment_KEGG, enrichment_Reactome, file=file_name)
   
   
   ##############################################################################
@@ -163,15 +167,22 @@ if(file.exists(file_name)){
   
   # PERFORM GSEA
   enrichment_SFARI = list()
+  cat('\n\nORA OF SFARI GENES\n')
   
   for(module in modules){
-      geneList = EA_dataset[,paste0('MM.',substring(module,2))]
-      names(geneList) = EA_dataset[,'entrezgene'] %>% as.character
-      geneList = sort(geneList, decreasing = TRUE)
+    cat('\n')
+    cat(paste0('Module: ', which(modules == module), '/', length(modules)))
+    geneList = EA_dataset[,paste0('MM.',substring(module,2))]
+    names(geneList) = EA_dataset[,'entrezgene'] %>% as.character
+    geneList = sort(geneList, decreasing = TRUE)
       
-      enrichment_SFARI[[module]] = clusterProfiler::GSEA(geneList, pAdjustMethod = 'bonferroni',  nPerm = nPerm,
-                                                         TERM2GENE = term2gene, pvalueCutoff = 1, maxGSSize=1000,
-                                                          verbose = FALSE, seed = TRUE) %>% data.frame
+    enrichment_SFARI[[module]] = clusterProfiler::GSEA(geneList, pAdjustMethod = 'bonferroni',  nPerm = nPerm,
+                                                       TERM2GENE = term2gene, pvalueCutoff = 1, maxGSSize=1000,
+                                                       verbose = FALSE, seed = TRUE) %>% data.frame
+    
+    # Temporal save
+    save(enrichment_GO, enrichment_DO, enrichment_DGN, enrichment_KEGG, enrichment_Reactome, 
+         enrichment_SFARI, file=file_name)
   }
 
   ##############################################################################
@@ -183,58 +194,6 @@ if(file.exists(file_name)){
 }
 
 ```
-<br>
-
-<!-- ### GSEA for SFARI Genes -->
-
-<!-- ```{r, warning=FALSE, message=FALSE} -->
-
-<!-- # PREPARE DATASET -->
-
-<!-- # Create dataset with top modules membership and removing the genes without an assigned module -->
-<!-- EA_dataset = data.frame('ensembl_gene_id' = genes_info$ID, module = genes_info$Module)  %>%  -->
-<!--              filter(genes_info$Module!='gray') -->
-
-<!-- # Assign Entrez Gene Id to each gene -->
-<!-- getinfo = c('ensembl_gene_id','entrezgene') -->
-<!-- mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl',  -->
-<!--                host='feb2014.archive.ensembl.org') -->
-<!-- biomart_output = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=genes_info$ID, mart=mart) -->
-
-<!-- EA_dataset = biomart_output %>% dplyr::rename('ID' = ensembl_gene_id) %>%  -->
-<!--              left_join(dataset %>% dplyr::select(ID, Module, contains('MM.')), by='ID') %>% -->
-<!--              filter(Module != 'gray') %>% dplyr::select(-Module) -->
-
-
-
-<!-- # BUILD MAPPING BETWEEN GENES AND SFARI -->
-
-<!-- # Build TERM2GENE: dataframe of 2 columns with term and gene -->
-<!-- term2gene = biomart_output %>% left_join(genes_info %>% dplyr::select(ID, `gene-score`),  -->
-<!--                                          by = c('ensembl_gene_id'='ID')) %>% filter(`gene-score`!='Others') %>% -->
-<!--             dplyr::select(-ensembl_gene_id) %>% mutate('SFARI' = 'SFARI',  -->
-<!--                                                        `gene-score` = paste0('SFARI Score ',`gene-score`)) %>% -->
-<!--             melt(id.vars = 'entrezgene') %>% dplyr::select(value, entrezgene) %>%  -->
-<!--             dplyr::rename('term' = value, 'gene' = entrezgene) %>% distinct -->
-
-
-<!-- # PERFORM GSEA -->
-
-<!-- modules = dataset$Module[dataset$Module!='gray'] %>% as.character %>% table %>% names -->
-<!-- enrichment_SFARI = list() -->
-
-<!-- for(module in modules_){ -->
-<!--     geneList = EA_dataset[,paste0('MM.',substring(module,2))] -->
-<!--     names(geneList) = EA_dataset[,'entrezgene'] %>% as.character -->
-<!--     geneList = sort(geneList, decreasing = TRUE) -->
-
-<!--     enrichment_SFARI[[module]] = clusterProfiler::GSEA(geneList, pAdjustMethod = 'bonferroni',  nPerm = nPerm, -->
-<!--                                                        TERM2GENE = term2gene, pvalueCutoff = 1, maxGSSize=1000, -->
-<!--                                                         verbose = FALSE, seed = TRUE) %>% data.frame -->
-<!-- } -->
-
-<!-- rm(getinfo, values, mart, biomart_output, term2gene, modules, module, geneList, EA_dataset) -->
-<!-- ``` -->
 <br>
 
 ### Enrichment in SFARI Genes by Module
@@ -316,4 +275,4 @@ p = plot_data %>% filter(Module == modules[1]) %>% ggplot(aes(Module, value, col
 ggExtra::ggMarginal(p, type = 'density', groupColour = TRUE, groupFill = TRUE, margins = 'x')
 
 ```
-<br>
+<br><br>

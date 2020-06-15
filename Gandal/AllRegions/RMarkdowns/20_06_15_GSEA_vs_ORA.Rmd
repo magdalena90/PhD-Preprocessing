@@ -1,0 +1,213 @@
+---
+title: 'GSEA vs ORA in top WGCNA Modules'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+```{r load_packages, warning=FALSE, message=FALSE}
+#setwd('/afs/inf.ed.ac.uk/user/s17/s1725186/Documents/PhD-Models/FirstPUModel/RMarkdowns')
+
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(dendextend)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally)
+library(knitr)
+
+```
+
+```{r load_dataset, message=FALSE, warning=FALSE}
+
+# Gandal dataset
+load('./../Data/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+DE_info = DE_info %>% data.frame
+
+
+# GO Neuronal annotations: regex 'neuron' in GO functional annotations and label the genes that make a match as neuronal
+GO_annotations = read.csv('./../Data/genes_GO_annotations.csv')
+GO_neuronal = GO_annotations %>% filter(grepl('neuron', go_term)) %>% 
+              mutate('ID'=as.character(ensembl_gene_id)) %>% 
+              dplyr::select(-ensembl_gene_id) %>% distinct(ID) %>%
+              mutate('Neuronal'=1)
+
+
+# SFARI Genes
+SFARI_genes = read_csv('./../../../SFARI/Data/SFARI_genes_01-03-2020_w_ensembl_IDs.csv')
+SFARI_genes = SFARI_genes[!duplicated(SFARI_genes$ID) & !is.na(SFARI_genes$ID),]
+
+
+# Clusterings
+clusterings = read_csv('./../Data/clusters.csv')
+
+
+# Update DE_info with SFARI and Neuronal information
+genes_info = DE_info %>% mutate('ID'=rownames(.)) %>% left_join(SFARI_genes, by='ID') %>% 
+  mutate(`gene-score`=ifelse(is.na(`gene-score`), 'Others', `gene-score`)) %>%
+  left_join(GO_neuronal, by='ID') %>% left_join(clusterings, by='ID') %>%
+  mutate(Neuronal=ifelse(is.na(Neuronal), 0, Neuronal)) %>%
+  mutate(gene.score=ifelse(`gene-score`=='Others' & Neuronal==1, 'Neuronal', `gene-score`), 
+         significant=padj<0.05 & !is.na(padj))
+
+
+clustering_selected = 'DynamicHybrid'
+genes_info$Module = genes_info[,clustering_selected]
+
+dataset = read.csv(paste0('./../Data/dataset_', clustering_selected, '.csv'))
+dataset$Module = dataset[,clustering_selected]
+
+top_modules = dataset %>% arrange(desc(MTcor)) %>% filter(abs(MTcor)>0.9) %>% dplyr::pull(Module) %>% 
+              unique %>% as.character
+
+# Correct SFARI Scores
+dataset$gene.score = genes_info$gene.score
+
+
+# Load Enrichment Analyses
+
+# GSEA
+load('./../Data/GSEA_bonferroni.RData')
+GSEA_GO = enrichment_GO
+GSEA_DGN = enrichment_DGN
+GSEA_DO = enrichment_DO
+GSEA_KEGG = enrichment_KEGG
+GSEA_Reactome = enrichment_Reactome
+GSEA_SFARI = enrichment_SFARI
+
+# ORA
+load('./../Data/ORA_bonferroni.RData')
+ORA_GO = enrichment_GO
+ORA_DGN = enrichment_DGN
+ORA_DO = enrichment_DO
+ORA_KEGG = enrichment_KEGG
+ORA_Reactome = enrichment_Reactome
+ORA_SFARI = enrichment_SFARI
+
+
+
+SFARI_colour_hue = function(r) {
+  pal = c('#FF7631','#FFB100','#E8E328','#8CC83F','#62CCA6','#59B9C9','#b3b3b3','#808080','gray','#d9d9d9')[r]
+}
+
+rm(DE_info, GO_annotations, clusterings, getinfo, mart, dds, GO_neuronal, enrichment_GO, enrichment_DO,
+   enrichment_DGN, erichment_DO, enrichment_KEGG, enrichment_Reactome)
+```
+
+```{r}
+# FUNCTIONS
+
+compare_methods = function(GSEA_list, ORA_list){
+  
+  for(top_module in top_modules){
+  
+    cat(paste0('  \n  \n  \n  \nEnrichments for Module ', top_module, ' (MTcor=', 
+               round(dataset$MTcor[dataset$Module==top_module][1],2), '):  \n  \n'))
+    
+    GSEA = GSEA_list[[top_module]]
+    ORA = ORA_list[[top_module]]
+    
+    cat(paste0('GSEA has ', nrow(GSEA), ' enriched terms  \n'))
+    cat(paste0('ORA has  ', nrow(ORA), ' enriched terms  \n'))
+    cat(paste0(sum(ORA$ID %in% GSEA$ID), ' terms are enriched in both methods  \n'))
+    
+    plot_data = GSEA %>% mutate(pval_GSEA = p.adjust) %>% dplyr::select(ID, Description, NES, pval_GSEA) %>%
+                inner_join(ORA %>% mutate(pval_ORA = p.adjust) %>% 
+                           dplyr::select(ID, pval_ORA, GeneRatio, qvalue), by = 'ID') 
+    
+    if(nrow(plot_data)>0) print(plot_data %>% mutate(pval_mean = pval_ORA + pval_GSEA) %>% 
+                                arrange(pval_mean) %>% dplyr::select(-pval_mean) %>% kable)
+  } 
+}
+
+
+plot_results = function(GSEA_list, ORA_list){
+  
+  l = htmltools::tagList()
+
+  for(i in 1:length(top_modules)){
+    
+    GSEA = GSEA_list[[top_modules[i]]]
+    ORA = ORA_list[[top_modules[i]]]
+    
+    plot_data = GSEA %>% mutate(pval_GSEA = p.adjust) %>% dplyr::select(ID, Description, NES, pval_GSEA) %>%
+                inner_join(ORA %>% mutate(pval_ORA = p.adjust) %>% dplyr::select(ID, pval_ORA), by = 'ID')
+    
+    if(nrow(plot_data)>5){
+      min_val = min(min(plot_data$pval_GSEA), min(plot_data$pval_ORA))
+      max_val = max(max(max(plot_data$pval_GSEA), max(plot_data$pval_ORA)),0.05)
+      ggp = ggplotly(plot_data %>% ggplot(aes(pval_GSEA, pval_ORA, color = NES)) + 
+                     geom_point(aes(id = Description)) + 
+                     geom_vline(xintercept = 0.05, color = 'gray', linetype = 'dotted') + 
+                     geom_hline(yintercept = 0.05, color = 'gray', linetype = 'dotted') + 
+                     ggtitle(paste0('Enriched terms in common for Module ', top_modules[i])) +
+                     scale_x_continuous(limits = c(min_val, max_val)) + 
+                     scale_y_continuous(limits = c(min_val, max_val)) + 
+                     xlab('Corrected p-value for GSEA') + ylab('Corrected p-value for ORA') +
+                     scale_colour_viridis(direction = -1) + theme_minimal() + coord_fixed())
+      l[[i]] = ggp
+    }
+  }
+  
+  return(l)
+}
+
+```
+
+### KEGG
+
+```{r  results = 'asis'}
+
+compare_methods(GSEA_KEGG, ORA_KEGG)
+
+```
+<br>
+
+### Reactome
+
+```{r results = 'asis'}
+
+compare_methods(GSEA_Reactome, ORA_Reactome)
+
+```
+<br>
+
+Plots of the results when there are more than 5 terms in common between methods:
+```{r, warning=FALSE, fig.width=6}
+
+plot_results(GSEA_Reactome, ORA_Reactome)
+
+```
+<br>
+
+### Gene Ontology
+
+```{r  results = 'asis'}
+
+compare_methods(GSEA_GO, ORA_GO)
+
+```
+<br>
+
+Plots of the results when there are more than 5 terms in common between methods:
+```{r, warning=FALSE}
+
+plot_results(GSEA_GO, ORA_GO)
+
+```
+<br>
+
+### Disease Ontology
+
+```{r  results = 'asis'}
+
+compare_methods(GSEA_DO, ORA_DO)
+
+```
+<br>
+
+### Disease Gene Network
+
+```{r  results = 'asis'}
+
+compare_methods(GSEA_DGN, ORA_DGN)
+
+```
+<br><br>
