@@ -1,0 +1,131 @@
+---
+title: 'PanelApp'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+Panels downloaded:
+
+- Autism
+
+- Intellectual Disability
+
+```{r load_packages, echo=TRUE, warning=FALSE, message=FALSE}
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(plotlyutils)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally) ; library(ggpubr)
+library(expss)
+library(biomaRt)
+```
+
+```{r load_data, warning=FALSE, message=FALSE}
+# Gandal dataset
+load('./../Data/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+DE_info = DE_info %>% data.frame
+
+# GO Neuronal annotations: regex 'neuron' in GO functional annotations and label the genes that make a match as neuronal
+GO_annotations = read.csv('./../Data/genes_GO_annotations.csv')
+GO_neuronal = GO_annotations %>% filter(grepl('neuron', go_term)) %>% 
+              mutate('ID'=as.character(ensembl_gene_id)) %>% 
+              dplyr::select(-ensembl_gene_id) %>% distinct(ID) %>%
+              mutate('Neuronal'=1)
+
+# SFARI Genes
+SFARI_genes = read_csv('./../../../SFARI/Data/SFARI_genes_01-03-2020_w_ensembl_IDs.csv')
+SFARI_genes = SFARI_genes[!duplicated(SFARI_genes$ID) & !is.na(SFARI_genes$ID),]
+
+# Update DE_info with SFARI and Neuronal information
+DE_info = DE_info %>% mutate('ID'=rownames(.)) %>% left_join(SFARI_genes, by='ID') %>% 
+  mutate(`gene-score`=ifelse(is.na(`gene-score`), 'None', `gene-score`)) %>%
+  distinct(ID, .keep_all = TRUE) %>% left_join(GO_neuronal, by='ID') %>%
+  mutate(Neuronal=ifelse(is.na(Neuronal), 0, Neuronal)) %>%
+  mutate(gene.score=ifelse(`gene-score`=='None' & Neuronal==1, 'Neuronal', `gene-score`), 
+         significant=padj<0.05 & !is.na(padj))
+
+# Add gene symbol
+getinfo = c('ensembl_gene_id','external_gene_id')
+mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl',
+               host='feb2014.archive.ensembl.org') ## Gencode v19
+gene_names = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=rownames(datExpr), mart=mart)
+
+# PanelApp
+ASD =  read.delim('../Data/PanelApp/Autism.tsv')
+ID = read.delim('../Data/PanelApp/Intellectual disability.tsv')
+
+
+SFARI_colour_hue = function(r) {
+  pal = c('#FF7631','#FFB100','#E8E328','#b3b3b3','#808080','gray','#d9d9d9')[r]
+}
+
+PanelApp_colour_hue = function(r) {
+  pal = c('#99cc00', '#ffcc00', '#ff6600', '#00b3b3', '#808080', 'gray')[r]
+}
+
+rm(GO_annotations)
+```
+
+
+
+```{r, warning=FALSE}
+
+plot_data = ID %>% mutate(ID = EnsemblId.GRch37., 
+                          rating = case_when(grepl('Green',Sources...separated.)==TRUE ~ 'Green',
+                                             grepl('Amber',Sources...separated.)==TRUE ~ 'Amber',
+                                             grepl('Red',Sources...separated.)==TRUE ~ 'Red',
+                                             TRUE ~ 'Missing')) %>% 
+            dplyr::select(ID, Phenotypes, rating) %>%
+            right_join(data.frame('ID' = rownames(datExpr), 'meanExpr' = rowMeans(datExpr), 
+                                  'Gene.Symbol' = gene_names$external_gene_id), by = 'ID') %>%
+            distinct(Gene.Symbol, rating, .keep_all = TRUE) %>%
+            mutate(rating = ifelse(is.na(rating), ifelse(ID %in% GO_neuronal$ID, 'Neuronal', 'Others'), 
+                                   rating)) %>% 
+            mutate(rating = factor(rating, levels = c('Green','Amber','Red','Missing','Neuronal','Others')))
+
+cro(plot_data$rating)
+
+# All comparisons
+comparisons = list(c('Missing','Red'), c('Missing','Amber'), c('Missing','Green'),
+                   c('Green','Red'), c('Amber','Green'), c('Red','Amber'),
+                   c('Missing','Neuronal'), c('Neuronal','Others'),
+                   c('Neuronal','Red'), c('Neuronal','Amber'), c('Neuronal','Green'),
+                   c('Others','Red'), c('Others','Amber'), c('Others','Green'))
+increase = 0.75
+base = 12.9
+pos_y_comparisons = c(1:4*increase + base, rep(5*increase + base, 4), c(6:12*increase+base))
+
+# Statistically Significant comparisons
+comparisons = list( c('Missing','Green'), c('Green','Red'),
+                    c('Amber','Green'), c('Neuronal','Others'), c('Neuronal','Red'), 
+                    c('Neuronal','Amber'), c('Neuronal','Green'),
+                   c('Others','Red'), c('Others','Amber'), c('Others','Green'))
+
+comparisons = list(c('Green','Amber'), c('Green','Red'), c('Green','Missing'), c('Green','Neuronal'), c('Green','Others'),
+                   c('Neuronal','Others'), c('Neuronal','Red'), 
+                   c('Neuronal','Amber'), c('Others','Missing'), c('Others','Red'), c('Others','Amber'))
+increase = 0.9
+base = 14
+pos_y_comparisons = c(1:5*increase + base, rep(6*increase + base, 2), c(7:10*increase+base))
+
+plot_data %>% ggplot(aes(rating, meanExpr, fill=rating)) + 
+              geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3) + 
+              xlab('PanelApp Rating') + ylab('Mean Level of Expression') +
+              stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
+                                 method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
+                                 tip.length = 0.015) +
+              scale_fill_manual(values=PanelApp_colour_hue(1:6)) + theme_minimal() + 
+              theme(legend.position = 'none')
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,618 @@
+---
+title: 'DisGeNET'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+```{r load_packages, echo=TRUE, warning=FALSE, message=FALSE}
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(plotlyutils)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally) ; library(ggpubr)
+library(VennDiagram)
+library(expss)
+library(biomaRt)
+library(disgenet2r)
+```
+
+```{r load_data, warning=FALSE, message=FALSE}
+# Gandal dataset
+load('./../Data/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+DE_info = DE_info %>% data.frame
+
+# GO Neuronal annotations: regex 'neuron' in GO functional annotations and label the genes that make a match as neuronal
+GO_annotations = read.csv('./../Data/genes_GO_annotations.csv')
+GO_neuronal = GO_annotations %>% filter(grepl('neuron', go_term)) %>% 
+              mutate('ID'=as.character(ensembl_gene_id)) %>% 
+              dplyr::select(-ensembl_gene_id) %>% distinct(ID) %>%
+              mutate('Neuronal'=1)
+
+# SFARI Genes
+SFARI_genes = read_csv('./../../../SFARI/Data/SFARI_genes_01-03-2020_w_ensembl_IDs.csv')
+SFARI_genes = SFARI_genes[!duplicated(SFARI_genes$ID) & !is.na(SFARI_genes$ID),]
+
+# Update DE_info with SFARI and Neuronal information
+DE_info = DE_info %>% mutate('ID'=rownames(.)) %>% left_join(SFARI_genes, by='ID') %>% 
+  mutate(`gene-score`=ifelse(is.na(`gene-score`), 'None', `gene-score`)) %>%
+  distinct(ID, .keep_all = TRUE) %>% left_join(GO_neuronal, by='ID') %>%
+  mutate(Neuronal=ifelse(is.na(Neuronal), 0, Neuronal)) %>%
+  mutate(gene.score=ifelse(`gene-score`=='None' & Neuronal==1, 'Neuronal', `gene-score`), 
+         significant=padj<0.05 & !is.na(padj))
+
+# Add gene symbol
+getinfo = c('ensembl_gene_id','external_gene_id')
+mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl',
+               host='feb2014.archive.ensembl.org') ## Gencode v19
+gene_names = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=rownames(datExpr), mart=mart)
+
+# DisGeNET
+DisGeNET = list()
+DisGeNET[['asd']] = disease2gene(disease = 'C0004352')@qresult   # Autism Spectrum Disorder
+DisGeNET[['scz']] = disease2gene(disease = 'C0036341')@qresult   # Schizophrenia
+DisGeNET[['bd']]  = disease2gene(disease = 'C0005586')@qresult   # Bipolar Disorder
+DisGeNET[['id']]  = disease2gene(disease = 'C3714756')@qresult   # Intellectual Disability
+DisGeNET[['dd']]  = disease2gene(disease = 'C0011581')@qresult   # Depressive Disorder
+DisGeNET[['ai']]  = disease2gene(disease = 'C0001973')@qresult   # Alcoholic Intoxication, Chronic
+DisGeNET[['bc']]  = disease2gene(disease = 'C0006142')@qresult   # Malignant Carcinoma of Breast
+DisGeNET[['cc']]  = disease2gene(disease = 'C0009402')@qresult   # Colorectal Carcinoma
+#lc  = disease2gene(disease = 'C0023893')@qresult   # Liver Cirrhosis NO: Only 2 scores
+#ht  = disease2gene(disease = 'C0019193')@qresult   # Hepatitis, Toxic No: Only 2 scores
+DisGeNET[['dm']]  = disease2gene(disease = 'C0011860')@qresult   # Diabetes Melitus
+DisGeNET[['ob']]  = disease2gene(disease = 'C0028754')@qresult   # Obesity
+DisGeNET[['ra']]  = disease2gene(disease = 'C0003873')@qresult   # Rheumatoid Arthiritis
+
+SFARI_colour_hue = function(r) {
+  pal = c('#FF7631','#FFB100','#E8E328','#b3b3b3','#808080','gray','#d9d9d9')[r]
+}
+
+
+rm(GO_annotations, mart, getinfo, dds)
+```
+
+## ASD
+<br>
+
+There is an ASD dataset in DisGeNET, so I'll check if there is some relation between this scores and SFARI Genes:
+
+SFARI has many more genes than DisGeNET, but they share a big proportion of DisGeNET's genes
+```{r fig.width=5}
+
+asd_info = data.frame('ID' = gene_names$ensembl_gene_id, 'gene_symbol' = gene_names$external_gene_id, 
+                       'meanExpr' = rowMeans(datExpr)) %>% 
+           left_join(SFARI_genes %>% dplyr::select(ID, `gene-score`), by = 'ID') %>%
+           left_join(DisGeNET[['asd']] %>% dplyr::select(gene_symbol, score), by = 'gene_symbol') %>%
+           mutate('SFARI' = !is.na(`gene-score`), 'DisGeNET' = !is.na(score)) %>% 
+           apply_labels('SFARI'= 'SFARI', 'DisGeNET' = 'DisGeNET')
+
+cro_cpct(asd_info$SFARI, list(asd_info$DisGeNET,total()))
+  
+draw.pairwise.venn(area1 = sum(asd_info$SFARI), area2 =  sum(asd_info$DisGeNET),
+                   cross.area = sum(asd_info$SFARI*asd_info$DisGeNET),
+                   col = c('#0099cc','#d147a3'), fill = c('#0099cc','#d147a3'), alpha = c(0.3,0.3), 
+                   category = c('SFARI','DisGeNET')) %>% grid.draw
+```
+
+And both scoring systems agree with each other quite well
+
+```{r}
+
+comparisons = list(c('2','3'), c('1','2'), c('3','1'))
+increase = 0.04
+base = 0.65
+pos_y_comparisons = c(1:3*increase + base)
+
+asd_info %>% filter(SFARI*DisGeNET == TRUE) %>% 
+             ggplot(aes(`gene-score` %>% as.factor, score, fill = `gene-score` %>% as.factor)) + 
+             geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3) + 
+             stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
+                                method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
+                                tip.length = 0.015) +
+             xlab('SFARI Scores') + ylab('DisGeNET Scores') + 
+             scale_fill_manual(values=SFARI_colour_hue(1:3)) + theme_minimal() + theme(legend.position = 'none')
+
+rm(asd_info, comparisons, increase, base, pos_y_comparisons)
+```
+<br><br>
+
+## Mental Disorders
+<br>
+
+- Autism Spectrum Disorders (261 genes)
+
+- Schizophrenia (883)
+
+- Bipolar Disorder (477)
+
+- Intellectual Disability (447)
+  
+- Depressive Disorder (289)
+
+- Chronic Alcoholic Intoxication (268)
+
+<br>
+
+### DisGeNET scores vs Mean Expression
+<br>
+
+There seems to be a weak positive relation between the two variables except for Depressive Disorder and Alcoholism
+```{r, warning=FALSE, message=FALSE, fig.width=10, fig.height=4}
+
+disgenet_info = data.frame('ID' = gene_names$ensembl_gene_id, 'gene_symbol' = gene_names$external_gene_id, 
+                       'meanExpr' = rowMeans(datExpr)) %>% 
+                left_join(DisGeNET[['asd']] %>% dplyr::rename('ASD'=score), by = 'gene_symbol') %>%
+                left_join(DisGeNET[['scz']] %>% dplyr::rename('Schizophrenia'=score), by = 'gene_symbol') %>%
+                left_join(DisGeNET[['bd']] %>% dplyr::rename('BipolarDisorder'=score), by = 'gene_symbol') %>%
+                left_join(DisGeNET[['id']] %>% dplyr::rename('IntellectualDisability'=score),by='gene_symbol')%>%
+                left_join(DisGeNET[['dd']] %>% dplyr::rename('DepressiveDisorder'=score), by='gene_symbol') %>%
+                left_join(DisGeNET[['ai']] %>% dplyr::rename('Alcoholism'=score), by = 'gene_symbol') %>%
+                dplyr::select(gene_symbol, meanExpr, ASD, Schizophrenia, BipolarDisorder, 
+                              IntellectualDisability, DepressiveDisorder, Alcoholism)
+
+
+disgenet_info %>% dplyr::select(-gene_symbol) %>% melt(id.vars = 'meanExpr') %>% 
+                  dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>%
+                  ggplot(aes(meanExpr, value, color = Disorder)) + geom_point(alpha=0.3) + 
+                  facet_grid(~Disorder) + geom_smooth(alpha = 0.2, method = 'loess') + 
+                  xlab('Mean Expression') + ylab('Score') + scale_y_log10() + theme_minimal() + 
+                  theme(legend.position = 'none')
+
+
+rm(asd_info)
+```
+
+There is a big overlap between SFARI Genes and the genes related to each of the disorders (luckily the overlap is largest with ASD)
+
+```{r, warning=FALSE, message=FALSE}
+
+table_info = disgenet_info %>% 
+             mutate('SFARI' = gene_symbol %in% SFARI_genes$`gene-symbol`[!is.na(SFARI_genes$`gene-score`)]) %>%
+             dplyr::select(-c(gene_symbol, meanExpr)) %>% melt(id.vars = 'SFARI') %>%
+             filter(!is.na(value)) %>% apply_labels(SFARI = 'SFARI', variable = 'DisGeNET')
+
+cro_cpct(table_info$SFARI, list(table_info$variable, total()))
+
+rm(table_info)
+```
+
+This overlap could be causing the positive relation between scores and mean expression, to check if this is the case, I'm going to analyse separetly the genes that are in the SFARI list from the rest.
+
+The pattern is quite noisy, but the positive relation seems to come from both SFARI and non-SFARI genes
+
+```{r, warning=FALSE, message=FALSE, fig.width=10, fig.height=6}
+
+disgenet_info %>% mutate('SFARI' = gene_symbol %in% SFARI_genes$`gene-symbol`) %>% 
+                  dplyr::select(-gene_symbol) %>% melt(id.vars = c('meanExpr', 'SFARI')) %>% 
+                  dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>%
+                  ggplot(aes(meanExpr, value, color = SFARI)) + geom_point(alpha=0.3) + 
+                  facet_grid(~Disorder) + geom_smooth(alpha = 0.2, method = 'loess') + 
+                  xlab('Mean Expression') + ylab('Score') + scale_y_log10() + theme_minimal() + 
+                  theme(legend.position = 'bottom')
+
+```
+
+For all disorders except Depressive Disorder, SFARI Genes have significantly higher scores than the rest of the genes
+
+```{r, warning=FALSE, message=FALSE, fig.width=12, fig.height=4}
+
+disgenet_info %>% mutate('SFARI' = gene_symbol %in% SFARI_genes$`gene-symbol`) %>% 
+                  dplyr::select(-gene_symbol) %>% melt(id.vars = c('meanExpr', 'SFARI')) %>% 
+                  dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>%
+                  ggplot(aes(SFARI, value, fill = SFARI)) + 
+                  geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3) + 
+                  facet_grid(~Disorder) + scale_y_log10() +
+                  stat_compare_means(label = 'p.signif', method = 't.test', 
+                                     method.args = list(var.equal = FALSE)) +
+                  xlab('Belong to SFARI Genes') + ylab('DisGeNET Score') +
+                  theme_minimal() + theme(legend.position = 'bottom')
+
+comparisons = list(c('non-SFARI','3'), c('non-SFARI','2'), c('non-SFARI','1'),
+                   c('3','2'), c('3','1'), c('2','1'))
+increase = 0.15
+base = 0.5
+pos_y_comparisons = log10(c(1:6*increase + base))
+
+disgenet_info %>% left_join(SFARI_genes %>% dplyr::select(`gene-symbol`, `gene-score`), 
+                            by = c('gene_symbol'='gene-symbol')) %>% 
+                  mutate(SFARI = ifelse(is.na(`gene-score`), 'non-SFARI', `gene-score` %>% as.character)) %>%
+                  mutate(SFARI = factor(SFARI, levels = c('1','2','3','non-SFARI'))) %>%
+                  dplyr::select(-c(gene_symbol, `gene-score`)) %>%
+                  melt(id.vars = c('meanExpr', 'SFARI')) %>% dplyr::rename('Disorder' = variable) %>%
+                  filter(!is.na(value)) %>%
+                  ggplot(aes(SFARI, value, fill = SFARI)) + 
+                  geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3) + 
+                  facet_grid(~Disorder) + scale_y_log10() +
+                  stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
+                                     method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
+                                     tip.length = 0.015) +
+                  xlab('SFARI Gene Score') + ylab('DisGeNET Score') +
+                  scale_fill_manual(values = SFARI_colour_hue(c(1:3,6))) +
+                  theme_minimal() + theme(legend.position = 'bottom')
+
+
+rm(asd_info, comparisons, increase, base, pos_y_comparisons)
+```
+<br>
+
+### DisGeNET binned scores vs Mean Expression
+<br>
+
+The relation is sometimes not that clear in the continuous scale (maybe because there aren't that many points and the relation is not that strong?) I'm going to separate the scores into three groups to see if a pattern is more visible this way
+
+Binned scores (selected to balance the number of genes in each group): 
+
+- Low: (0,0.31]
+
+- Medium: (0.31,0.45]
+
+- High: (0.45,1]
+
+<br>
+
+Same conclusions as before, just different visualisations
+<br>
+
+```{r, warning=FALSE, message=FALSE, fig.width=10, fig.height=4}
+
+comparisons = list(c('Low','Medium'), c('Low','High'), c('Medium','High'))
+increase = 0.9
+base = 15
+pos_y_comparisons = c(1:3*increase + base)
+
+disgenet_info %>% dplyr::select(-gene_symbol) %>% melt(id.vars = 'meanExpr') %>% 
+                  dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>%
+                  mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
+                                             labels = c('Low','Medium','High'))) %>%
+                  mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low'))) %>%
+                  ggplot(aes(binned_scores, meanExpr)) + facet_grid(~Disorder) +
+                  geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill = Disorder)) + 
+                  stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
+                                     method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
+                                     tip.length = 0.015) +
+                  xlab('Binned Scores') + ylab('Mean Expression') + 
+                  theme_minimal() + theme(legend.position = 'none')
+
+rm(asd_info, comparisons, increase, base, pos_y_comparisons)
+```
+<br>
+
+Separating SFARI Genes
+```{r, warning=FALSE, message=FALSE, fig.width=10, fig.height=6}
+
+comparisons = list(c('Low','Medium'), c('Low','High'), c('Medium','High'))
+increase = 1
+base = 15
+pos_y_comparisons = c(1:3*increase + base)
+
+disgenet_info %>% mutate('SFARI' = gene_symbol %in% SFARI_genes$`gene-symbol`) %>% 
+                  dplyr::select(-gene_symbol) %>% melt(id.vars = c('meanExpr', 'SFARI')) %>% 
+                  dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>%
+                  mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
+                                             labels = c('Low','Medium','High'))) %>%
+                  mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low'))) %>%
+                  ggplot(aes(binned_scores, meanExpr)) + facet_grid(SFARI ~ Disorder) +
+                  geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill = Disorder)) + 
+                  stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
+                                  method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
+                                  tip.length = 0.015) +
+                  xlab('Binned Scores') + ylab('Mean Expression') +
+                  theme_minimal() + theme(legend.position = 'none')
+
+
+rm(comparisons, increase, base, pos_y_comparisons)
+```
+<br><br>
+
+---
+
+<br><br>
+
+## Other Diseases
+<br>
+
+- Malignant neoplasm of breast (1074)
+
+- Experimental Liver Cirrhosis (774)
+
+- Colorectal carcinoma (702)
+
+- Hepatitis, Toxic (404)
+
+- Diabetes Melitus (221)
+
+<br>
+
+### DisGeNET scores vs Mean Expression
+<br>
+
+There doesn't seem to be a recognisable relation between mean expression and score for any of these diseases
+
+```{r, warning=FALSE, message=FALSE, fig.width=10, fig.height=4}
+
+disgenet_info = data.frame('ID' = gene_names$ensembl_gene_id, 'gene_symbol' = gene_names$external_gene_id, 
+                       'meanExpr' = rowMeans(datExpr)) %>% 
+                left_join(DisGeNET[['bc']] %>% dplyr::rename('BreastCancer'=score), by = 'gene_symbol') %>%
+                left_join(DisGeNET[['cc']] %>% dplyr::rename('ColorectalCarcinoma'=score), by='gene_symbol')%>%
+                left_join(DisGeNET[['dm']] %>% dplyr::rename('Diabetes'=score), by = 'gene_symbol') %>%
+                left_join(DisGeNET[['ob']] %>% dplyr::rename('Obesity'=score), by = 'gene_symbol') %>%
+                left_join(DisGeNET[['ra']] %>% dplyr::rename('Arthritis'=score), by = 'gene_symbol') %>%
+                dplyr::select(gene_symbol, meanExpr, BreastCancer, ColorectalCarcinoma, Diabetes, Obesity,
+                              Arthritis)
+
+
+disgenet_info %>% dplyr::select(-gene_symbol) %>% melt(id.vars = 'meanExpr') %>% 
+                  dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>%
+                  ggplot(aes(meanExpr, value, color = Disorder)) + geom_point(alpha=0.3) + 
+                  facet_grid(~Disorder) + geom_smooth(alpha = 0.2, method = 'loess') + 
+                  xlab('Mean Expression') + ylab('Score') + scale_y_log10() + theme_minimal() + 
+                  theme(legend.position = 'none')
+
+```
+
+There is still an overlap with SFARI Genes, not as big as with neurological disorders, but still weird, since these diseases aren't related to ASD
+
+```{r, warning=FALSE, message=FALSE}
+
+table_info = disgenet_info %>% 
+             mutate('SFARI' = gene_symbol %in% SFARI_genes$`gene-symbol`[!is.na(SFARI_genes$`gene-score`)]) %>%
+             dplyr::select(-c(gene_symbol, meanExpr)) %>% melt(id.vars = 'SFARI') %>%
+             filter(!is.na(value)) %>% apply_labels(SFARI = 'SFARI', variable = 'DisGeNET')
+
+cro_cpct(table_info$SFARI, list(table_info$variable, total()))
+
+rm(table_info)
+```
+
+This seems to be just noise, perhaps there aren't enough points for a reliable fit
+
+```{r, warning=FALSE, message=FALSE, fig.width=10, fig.height=6}
+
+disgenet_info %>% mutate('SFARI' = gene_symbol %in% SFARI_genes$`gene-symbol`) %>% 
+                  dplyr::select(-gene_symbol) %>% melt(id.vars = c('meanExpr', 'SFARI')) %>% 
+                  dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>%
+                  ggplot(aes(meanExpr, value, color = SFARI)) + geom_point(alpha=0.3) + 
+                  facet_grid(~Disorder) + geom_smooth(alpha = 0.2, method = 'loess') + 
+                  xlab('Mean Expression') + ylab('Score') + scale_y_log10() + theme_minimal() + 
+                  theme(legend.position = 'bottom')
+
+```
+
+There is no longer a relation between SFARI Genes and the scores of this diseases, either all together or separating them by scores
+
+```{r, warning=FALSE, message=FALSE, fig.width=12, fig.height=4}
+
+disgenet_info %>% mutate('SFARI' = gene_symbol %in% SFARI_genes$`gene-symbol`) %>% 
+                  dplyr::select(-gene_symbol) %>% melt(id.vars = c('meanExpr', 'SFARI')) %>% 
+                  dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>%
+                  ggplot(aes(SFARI, value, fill = SFARI)) + 
+                  geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3) + 
+                  facet_grid(~Disorder) + scale_y_log10() + ggtitle('DisGeNET Scores vs SFARI Genes') +
+                  stat_compare_means(label = 'p.signif', method = 't.test', 
+                                     method.args = list(var.equal = FALSE)) +
+                  xlab('Belong to SFARI Genes') + ylab('DisGeNET Score') +
+                  theme_minimal() + theme(legend.position = 'bottom')
+
+comparisons = list(c('non-SFARI','3'), c('non-SFARI','2'), c('non-SFARI','1'),
+                   c('3','2'), c('3','1'), c('2','1'))
+increase = 0.15
+base = 0.5
+pos_y_comparisons = log10(c(1:6*increase + base))
+
+disgenet_info %>% left_join(SFARI_genes %>% dplyr::select(`gene-symbol`, `gene-score`), 
+                            by = c('gene_symbol'='gene-symbol')) %>% 
+                  mutate(SFARI = ifelse(is.na(`gene-score`), 'non-SFARI', `gene-score` %>% as.character)) %>%
+                  mutate(SFARI = factor(SFARI, levels = c('1','2','3','non-SFARI'))) %>%
+                  dplyr::select(-c(gene_symbol, `gene-score`)) %>%
+                  melt(id.vars = c('meanExpr', 'SFARI')) %>% dplyr::rename('Disorder' = variable) %>%
+                  filter(!is.na(value)) %>%
+                  ggplot(aes(SFARI, value, fill = SFARI)) + 
+                  geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3) + 
+                  facet_grid(~Disorder) + scale_y_log10() + ggtitle('DisGeNET Scores vs SFARI Scores') +
+                  stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
+                                     method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
+                                     tip.length = 0.015) +
+                  xlab('SFARI Gene Score') + ylab('DisGeNET Score') +
+                  scale_fill_manual(values = SFARI_colour_hue(c(1:3,6))) +
+                  theme_minimal() + theme(legend.position = 'bottom')
+
+
+rm(asd_info, comparisons, increase, base, pos_y_comparisons)
+```
+<br>
+
+### DisGeNET binned scores vs Mean Expression
+<br>
+
+Usin the same binned scores as before: 
+
+- Low: (0,0.31]
+
+- Medium: (0.31,0.45]
+
+- High: (0.45,1]
+
+<br>
+
+Same conclusions as before, just different visualisations
+<br>
+
+```{r, warning=FALSE, message=FALSE, fig.width=10, fig.height=4}
+
+comparisons = list(c('Low','Medium'), c('Low','High'), c('Medium','High'))
+increase = 0.9
+base = 15
+pos_y_comparisons = c(1:3*increase + base)
+
+disgenet_info %>% dplyr::select(-gene_symbol) %>% melt(id.vars = 'meanExpr') %>% 
+                  dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>%
+                  mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
+                                             labels = c('Low','Medium','High'))) %>%
+                  mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low'))) %>%
+                  ggplot(aes(binned_scores, meanExpr)) + facet_grid(~Disorder) +
+                  geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill = Disorder)) + 
+                  stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
+                                     method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
+                                     tip.length = 0.015) +
+                  xlab('Binned Scores') + ylab('Mean Expression') + 
+                  theme_minimal() + theme(legend.position = 'none')
+
+rm(asd_info, comparisons, increase, base, pos_y_comparisons)
+```
+<br>
+
+Separating SFARI Genes
+```{r, warning=FALSE, message=FALSE, fig.width=10, fig.height=6}
+
+comparisons = list(c('Low','Medium'), c('Low','High'), c('Medium','High'))
+increase = 1
+base = 15
+pos_y_comparisons = c(1:3*increase + base)
+
+disgenet_info %>% mutate('SFARI' = gene_symbol %in% SFARI_genes$`gene-symbol`) %>% 
+                  dplyr::select(-gene_symbol) %>% melt(id.vars = c('meanExpr', 'SFARI')) %>% 
+                  dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>%
+                  mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
+                                             labels = c('Low','Medium','High'))) %>%
+                  mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low'))) %>%
+                  ggplot(aes(binned_scores, meanExpr)) + facet_grid(SFARI ~ Disorder) +
+                  geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill=Disorder)) + 
+                  stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
+                                  method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
+                                  tip.length = 0.015) +
+                  xlab('Binned Scores') + ylab('Mean Expression') + 
+                  theme_minimal() + theme(legend.position = 'none')
+
+```
+<br><br>
+
+---
+
+<br><br>
+
+## Schizophrenia
+<br>
+
+It seems that this is the only disorder with a significant relation between its scores and mean expression, so I'll try to see if this relation comes from the SFARI Genes or ASD genes
+
+The relation doesn't seem to come from the SFARI genes (it's even stronger in the genes that are not in SFARI)
+```{r}
+scz_info = data.frame('ID' = gene_names$ensembl_gene_id, 'gene_symbol' = gene_names$external_gene_id, 
+                       'meanExpr' = rowMeans(datExpr)) %>% 
+           left_join(DisGeNET[['scz']] %>% dplyr::rename('Schizophrenia'=score), by = 'gene_symbol') %>%
+           dplyr::select(gene_symbol, meanExpr, Schizophrenia)
+
+scz_info %>% mutate('SFARI' = gene_symbol %in% SFARI_genes$`gene-symbol`) %>% 
+             dplyr::select(-gene_symbol) %>% melt(id.vars = c('meanExpr', 'SFARI')) %>% 
+             dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>%
+             mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
+                                        labels = c('Low','Medium','High'))) %>%
+             mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low'))) %>%
+             ggplot(aes(binned_scores, meanExpr)) + facet_wrap(~SFARI) +
+             geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill = SFARI)) + 
+             stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
+                                method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
+                                tip.length = 0.015) +
+             xlab('Binned Scores') + ylab('Mean Expression') + 
+             theme_minimal() + theme(legend.position = 'none') + ggtitle('Schizophrenia divided by SFARI')
+```
+<br>
+
+The relation doesn't come from the DisGeNET ASD genes (actually the opposite, the relation is stronger in the genes that are not in the ASD list)
+```{r}
+scz_info %>% mutate('DisGeNET_ASD' = gene_symbol %in% DisGeNET$asd$gene_symbol) %>% 
+             dplyr::select(-gene_symbol) %>% melt(id.vars = c('meanExpr', 'DisGeNET_ASD')) %>% 
+             dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>% 
+             mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
+                                        labels = c('Low','Medium','High'))) %>%
+             mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low'))) %>%
+             ggplot(aes(binned_scores, meanExpr)) + facet_wrap(~DisGeNET_ASD) +
+             geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill = DisGeNET_ASD)) + 
+             stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
+                                method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
+                                tip.length = 0.015) +
+             xlab('Binned Scores') + ylab('Mean Expression') +
+             ggtitle('Schizophrenia divided by DisGeNET ASD dataset') +
+             theme_minimal() + theme(legend.position = 'none')
+
+rm(scz_info, comparisons, increase, base, pos_y_comparisons)
+```
+<br>
+Maybe its the other way around? maybe the bias by mean expression in ASD is induced by genes related to schizophrenia and not the other way around?
+
+```{r}
+SFARI_data = SFARI_genes %>% dplyr::select(ID, `gene-symbol`, `gene-score`) %>% 
+             mutate('DisGeNET_scz' = `gene-symbol` %in% DisGeNET$scz$gene_symbol,
+                    `gene-score` = factor(`gene-score`, levels = c('1','2','3'))) %>%
+             left_join(data.frame('ID' = rownames(datExpr), 'meanExpr' = rowMeans(datExpr)), by = 'ID') %>%
+             filter(!is.na(meanExpr) & !is.na(`gene-score`))
+
+comparisons = list(c('1','2'), c('1','3'), c('2','3'))
+increase = 0.9
+base = 14
+pos_y_comparisons = c(1:3*increase + base)
+
+SFARI_data %>% ggplot(aes(`gene-score`, meanExpr)) + facet_wrap(~DisGeNET_scz) +
+               geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill=`gene-score`)) +
+               stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
+                                  method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
+                                  tip.length = 0.015) +
+               scale_fill_manual(values = SFARI_colour_hue(1:3)) + 
+               xlab('SFARI Gene Scores') + ylab('Mean Expression') +
+               ggtitle('SFARI Genes divided by DisGeNET SCZ dataset') +
+               theme_minimal() + theme(legend.position = 'none')
+               
+```
+
+```{r}
+asd_info = data.frame('ID' = gene_names$ensembl_gene_id, 'gene_symbol' = gene_names$external_gene_id, 
+                       'meanExpr' = rowMeans(datExpr)) %>% 
+           left_join(DisGeNET[['asd']] %>% dplyr::rename('ASD'=score), by = 'gene_symbol') %>%
+           dplyr::select(gene_symbol, meanExpr, ASD)
+
+comparisons = list(c('Low','Medium'), c('Low','High'), c('Medium','High'))
+increase = 1
+base = 15
+pos_y_comparisons = c(1:3*increase + base)
+
+asd_info %>% mutate('DisGeNET_SCZ' = gene_symbol %in% DisGeNET$scz$gene_symbol) %>% 
+             dplyr::select(-gene_symbol) %>% melt(id.vars = c('meanExpr', 'DisGeNET_SCZ')) %>% 
+             dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>% 
+             mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
+                                        labels = c('Low','Medium','High'))) %>%
+             mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low'))) %>%
+             ggplot(aes(binned_scores, meanExpr)) + facet_wrap(~DisGeNET_SCZ) +
+             geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill = DisGeNET_SCZ)) + 
+             stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
+                                method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
+                                tip.length = 0.015) +
+             xlab('Binned Scores') + ylab('Mean Expression') +
+             ggtitle('DisGeNET ASD divided by DisGeNET SCZ dataset') +
+             theme_minimal() + theme(legend.position = 'none')
+
+```
+
+<br><br>
+
+---
+
+<br><br>
+
+## Conclusions
+<br>
+
+- SFARI and DisGeNET ASD scores agree between them both in membership as in scores
+
+- There is a big overlap between SFARI Genes and the genes in all of the diseases studied, considering that there are only 789 SFARI Genes
+
+- The closer the disorder is to ASD:
+
+    - The stronger the relation between SFARI Genes and the DisGeNET scores 
+    
+    - The stronger the relation between score and mean expression
+    
+    - Schizophrenia having statistical significant differences, Bipolar Disorder and Intellectual Disability visible diferences but not strong enough to be significant, and the rest of the diseases not having any recognisable pattern
+
+<br><br>
+
+
+
+

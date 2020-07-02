@@ -1,5 +1,5 @@
 ---
-title: 'GSEA of Modules with highest Enrichment in SFARI Genes'
+title: 'GSEA of Top Modules'
 output:
   html_document:
     code_folding: 'hide'
@@ -84,9 +84,39 @@ ggplotly(plot_data %>% ggplot(aes(reorder(Module, -MTcor), MTcor)) + geom_bar(st
 ```
 
 ```{r}
-top_modules = plot_data$Module[abs(plot_data$MTcor)>0.9]
+top_modules = plot_data %>% arrange(desc(MTcor)) %>% filter(abs(MTcor)>0.9) %>% dplyr::pull(Module) %>% 
+              unique %>% as.character
 
 cat(paste0('Top modules selected: ', paste(top_modules, collapse=', '),'\n'))
+
+print_results = function(enrichment_list){
+  
+  for(module in top_modules){
+    
+    df = enrichment_list[[module]] %>% dplyr::select(ID, Description, setSize, NES, p.adjust, qvalues) %>% 
+         arrange(desc(NES)) %>% filter(NES>0, p.adjust<0.05)
+    
+    if(nrow(df)>0){
+      
+      print(kable(df, caption = paste0('Enriched terms for module ', module, ' (MTcor = ', 
+                                       round(dataset$MTcor[dataset$Module==module][1],2),')')))
+      cat('\n') 
+    
+    } else {
+      df = enrichment_list[[module]] %>% dplyr::select(ID, Description, setSize, NES, p.adjust, qvalues) %>% 
+            arrange(desc(NES)) %>% filter(p.adjust<0.05)
+      
+      if(nrow(df)>0){
+        
+        print(kable(df, caption = paste0('Negatively Enriched terms for module ', module, ' (MTcor = ', 
+                                         round(dataset$MTcor[dataset$Module==module][1],2),')')))
+        cat('\n') 
+        
+      } else cat(paste0('\nNo enrichment found for module ',module,'\n'))
+    }
+  }
+}
+
 ```
 <br>
 
@@ -96,60 +126,41 @@ cat(paste0('Top modules selected: ', paste(top_modules, collapse=', '),'\n'))
 ## KEGG
 ```{r, results = 'asis'}
 
-for(module in top_modules){
-  df = enrichment_KEGG[[module]] %>% dplyr::select(ID, Description, setSize, NES, p.adjust, qvalues) %>% arrange(desc(NES)) %>% filter(NES>0)
-  if(nrow(df)>0){
-    print(kable(df, caption = paste0('Enriched terms for module ', module, ' (MTcor = ', round(dataset$MTcor[dataset$Module==module][1],2),')')))
-    cat('\n') 
-  } else cat(paste0('\nNo enrichment found for module ',module,'\n'))
-}
+print_results(enrichment_KEGG)
 
-rm(df)
 ```
 <br>
 
 ## Reactome
 ```{r, results = 'asis'}
 
-for(module in top_modules){
-  df = enrichment_Reactome[[module]] %>% dplyr::select(ID, Description, setSize, NES, p.adjust, qvalues) %>% arrange(desc(NES)) %>% filter(NES>0)
-  if(nrow(df)>0){
-    print(kable(df, caption = paste0('Enriched terms for module ', module, ' (MTcor = ', round(dataset$MTcor[dataset$Module==module][1],2),')')))
-    cat('\n') 
-  } else cat(paste0('\nNo enrichment found for module ',module,'\n'))
-}
+print_results(enrichment_Reactome)
 
-rm(df)
 ```
 <br>
 
 ## Gene Ontology
 ```{r, results = 'asis'}
 
-for(module in top_modules){
-  df = enrichment_GO[[module]] %>% dplyr::select(ID, Description, setSize, NES, p.adjust, qvalues) %>% arrange(desc(NES)) %>% filter(NES>0)
-  if(nrow(df)>0){
-    print(kable(df, caption = paste0('Enriched terms for module ', module, ' (MTcor = ', round(dataset$MTcor[dataset$Module==module][1],2),')')))
-    cat('\n') 
-  } else cat(paste0('\nNo enrichment found for module ',module,'\n'))
-}
+print_results(enrichment_GO)
 
-rm(df)
 ```
+<br>
+
+## Disease Ontology
+```{r, results = 'asis'}
+
+print_results(enrichment_DO)
+
+```
+
 <br>
 
 ## Disease Gene Network
 ```{r, results = 'asis'}
 
-for(module in top_modules){
-  df = enrichment_DGN[[module]] %>% dplyr::select(ID, Description, setSize, NES, p.adjust, qvalues) %>% arrange(desc(NES)) %>% filter(NES>0)
-  if(nrow(df)>0){
-    print(kable(df, caption = paste0('Enriched terms for module ', module, ' (MTcor = ', round(dataset$MTcor[dataset$Module==module][1],2),')')))
-    cat('\n') 
-  } else cat(paste0('\nNo enrichment found for module ',module,'\n'))
-}
+print_results(enrichment_DGN)
 
-rm(df)
 ```
 
 

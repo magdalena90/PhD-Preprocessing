@@ -680,8 +680,8 @@ rm(p1,p2,p3)
 
 ```{r, fig.width=10}
 p1 = std_magnitudes_score_1 %>% ggplot(aes(gene.score, std_magnitude, color = gene.score)) + 
-     stat_summary(fun.data = mean_sd, geom = 'errorbar', width = 0.5, color = '#999999') + s
-     tat_summary(fun = mean, geom = 'point', size = 3) +
+     stat_summary(fun.data = mean_sd, geom = 'errorbar', width = 0.5, color = '#999999') +
+     stat_summary(fun = mean, geom = 'point', size = 3) +
      stat_compare_means(comparisons = list(c('1','Neuronal'), c('1','Others')), label = 'p.signif',
                         method = 't.test', method.args = list(var.equal = FALSE), label.y = c(1.7, 2), 
                         tip.length = 0.01) +
@@ -706,10 +706,10 @@ p3 = std_magnitudes_score_3 %>% ggplot(aes(gene.score, std_magnitude, color = ge
      scale_colour_manual(values=SFARI_colour_hue(r=c(3,8,7))) + xlab('') + ylab('Standardised LFC Magnitude') +
      theme_minimal() + theme(legend.position = 'none')
 
-grid.arrange(p1,p2,p3,nrow=1,
+grid.arrange(p1, p2, p3, nrow = 1,
              top = 'Comparison of LFC Magnitude of SFARI genes and their closest neighbours by Mean Expression')
 
-rm(std_magnitudes_score_1, std_magnitudes_score_2, std_magnitudes_score_3)
+rm(p1, p2, p3)
 ```
 
 
@@ -746,6 +746,8 @@ t_test_df = rbind(results_1, results_2, results_3) %>% data.frame %>%
             mutate(same_mean = ifelse(BH_p_val<0.05, 'No', 'Possible'))
 
 t_test_df %>% kable
+
+rm(std_magnitudes_score_1, std_magnitudes_score_2, std_magnitudes_score_3)
 ```
 
 ***
